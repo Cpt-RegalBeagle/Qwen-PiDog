@@ -9,7 +9,10 @@ All settings for the voice assistant, including:
 """
 from typing import Optional
 import os
+from dotenv import load_dotenv
 
+# Load secret environment variables from local .env file
+load_dotenv()
 
 # ==================== AUDIO SETTINGS ====================
 OUTPUT_DEVICE_ID: str = os.getenv("PIDOG_OUTPUT_DEVICE", "pipewire")
@@ -18,7 +21,7 @@ OUTPUT_DEVICE_ID: str = os.getenv("PIDOG_OUTPUT_DEVICE", "pipewire")
 # PiDog voiceHAT is typically device 0. Set to None for local machine auto-detect.
 INPUT_DEVICE_ID: Optional[str] = (
     os.getenv("PIDOG_INPUT_DEVICE") or
-    ("0" if os.getenv("REMOTE_PI_DOG_ENABLED", "false") != "false" else None)
+    ("0" if os.getenv("REMOTE_PI_DOG_ENABLED", "false").lower() != "false" else None)
 )
 VOSK_SAMPLERATE: int = 16000
 AUDIO_DEVICE_NAME: str = "piDog"
@@ -49,7 +52,8 @@ STT_HOST_URL: str = f"http://{SERVER_IP}:{PORT_WEBUI}/api/v1/audio/transcription
 WHISPER_HEALTH_URL: str = f"http://{SERVER_IP}:{PORT_WEBUI}/health"
 
 # ==================== AUTHENTICATION ====================
-WEBUI_API_KEY: str = os.getenv("WEBUI_API_KEY", "sk-ae574780a163488da0955acd0a4eaf27")
+# Loaded dynamically from environment or fallback placeholder
+WEBUI_API_KEY: str = os.getenv("WEBUI_API_KEY", "PLACEHOLDER_KEY")
 AUTH_HEADERS: dict[str, str] = {
     "Authorization": f"Bearer {WEBUI_API_KEY}",
     "Accept": "application/json"
@@ -79,37 +83,25 @@ PI_DOG_RGB_STRIP_BRIGHTNESS: float = 0.8
 PI_DOG_RGB_STRIP_BPS: float = 0.6
 
 # ==================== REMOTE PI DOG DESTINATION SETTINGS ====================
-# Remote PiDog deployment configuration
 REMOTE_PI_DOG_ENABLED: bool = os.getenv("REMOTE_PI_DOG_ENABLED", "true").lower() == "true"
-
-# Remote PiDog IP address (default: same as local server)
 REMOTE_PI_DOG_IP: str = os.getenv("REMOTE_PI_DOG_IP", SERVER_IP)
-
-# Remote PiDog port for audio streaming
 REMOTE_PI_DOG_PORT: int = int(os.getenv("REMOTE_PI_DOG_PORT", PORT_WEBUI))
-
-# Remote PiDog username for SSH/SCP deployment
 REMOTE_PI_DOG_USER: str = os.getenv("REMOTE_PI_DOG_USER", "pidog")
 
-# Remote PiDog password for SSH/SCP deployment
-REMOTE_PI_DOG_PASSWORD: str = os.getenv("REMOTE_PI_DOG_PASSWORD", "m2210931385")
-
-# Remote PiDog authentication method (password, key, or none)
+# Loaded dynamically from environment or fallback placeholder
+REMOTE_PI_DOG_PASSWORD: str = os.getenv("REMOTE_PI_DOG_PASSWORD", "PLACEHOLDER_PASSWORD")
 REMOTE_PI_DOG_AUTH_METHOD: str = os.getenv("REMOTE_PI_DOG_AUTH_METHOD", "password")
-
-# Remote PiDog deployment path
 REMOTE_PI_DOG_DEPLOY_PATH: str = os.getenv("REMOTE_PI_DOG_DEPLOY_PATH", "/home/pidog/pidog")
-
-# Remote PiDog deployment script path
 REMOTE_PI_DOG_SCRIPT_PATH: str = os.getenv("REMOTE_PI_DOG_SCRIPT_PATH", "/home/pidog/pidog")
 
 # ==================== SSH CONFIGURATION FOR PIDOG ====================
-# SSH host configuration for pidog robot
 PIDOG_SSH_HOST: str = "pidog"
 PIDOG_SSH_IP: str = "192.168.0.15"
 PIDOG_SSH_PORT: str = "22"
 PIDOG_SSH_USER: str = "pidog"
-PIDOG_SSH_PASSWORD: str = "m2210931385"
+
+# Loaded dynamically from environment or fallback placeholder
+PIDOG_SSH_PASSWORD: str = os.getenv("PIDOG_SSH_PASSWORD", "PLACEHOLDER_PASSWORD")
 PIDOG_SSH_STRICT_HOST_CHECK: bool = False
 PIDOG_SSH_KNOWN_HOSTS_FILE: str = "/dev/null"
 
@@ -142,6 +134,4 @@ STORE_FILE: str = os.getenv("STORE_FILE", "/state.pkl")
 DEBUG_MODE: bool = os.getenv("DEBUG_MODE", "false").lower() == "true"
 
 # ==================== THINKING SETTINGS ====================
-# Enable thinking (verbose reasoning mode) for larger models
-# Set to True for qwen3.5:90b (full thinking), False for qwen3.5:9b (no thinking)
 THINK_MODEL_THINK: bool = os.getenv("THINK_MODEL_THINK", "false").lower() == "true"

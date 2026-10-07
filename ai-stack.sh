@@ -11,12 +11,19 @@
 
 set -euo pipefail
 
+# Load environment variables from the shared .env file if it exists
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "⚠️ Warning: .env file not found in current directory. Using system env fields."
+fi
+
 # 1. Shared System Configurations
-TAVILY_API_KEY="${TAVILY_API_KEY:-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}"
+TAVILY_API_KEY="${TAVILY_API_KEY:-}"
 STORAGE_PATH="/var/home/Ollie/open-webui-storage"
 WEBUI_PORT=8080
 OLLAMA_PORT=11434
-WEBUI_API_KEY="${WEBUI_API_KEY:-sk-ae574780a163488da0955acd0a4eaf27}"
+WEBUI_API_KEY="${WEBUI_API_KEY:-}"
 JARVIS_PORT=3000
 KOKORO_PORT=8880
 
@@ -67,13 +74,12 @@ podman run -d \
 
 # 5. Cloudflare Tunnel for Ollama (Remote Access)
 echo "🌐 Configuring Ollama Cloudflare tunnel..."
-CF_TUNNEL_TOKEN_2="eyJhIjoiNGJlYmU0ZmQyODAzOGI1OTY1MDE2ZDNkMDRiNDE3ODciLCJ0IjoiZjMzZTMyODAtMDc5ZC00YTA5LWI1ZmEtNGEzMDVhOTE0YmJkIiwicyI6Ik56UmxaR1kzWkdRdFpXUXlNaTAwT1dFMkxUbGhPV0l0T1dVeVlUSXlOemMyWlRJMiJ9"
 podman run -d \
     --name cf-tunnel-ollama \
     --net=host \
     --restart always \
     --security-opt label=disable \
-    -e TUNNEL_TOKEN="$CF_TUNNEL_TOKEN_2" \
+    -e TUNNEL_TOKEN="${CF_TUNNEL_TOKEN_OLLAMA:-}" \
     -e TUNNEL_ORIGIN_URL="http://localhost:${OLLAMA_PORT}" \
     -e TUNNEL_DNS="pidog.meigs.co.uk:11434" \
     -e TUNNEL_NO_AUTOUPDATE="true" \
@@ -82,17 +88,15 @@ podman run -d \
 
 # 6. Cloudflare Tunnel for WebUI (STT Interface)
 echo "🎤 Starting WebUI STT interface..."
-CF_TUNNEL_TOKEN="eyJhIjoiNGJlYmU0ZmQyODAzOGI1OTY1MDE2ZDNkMDRiNDE3ODciLCJ0IjoiMTkwOGFiZjgtMDRiMS00NDkzLWI2ZjAtZjI1ZWI4YmMwNmU5IiwicyI6Ik1HSmpNVEJtTVRndFlqZGhPQzAwTm1NeExUa3dOV1F0WWpJMVptSXlPR0ppWXpFNE4ySTVObUV4TjJVdE5UQmhPUzAwWlRFeExUZ3pZVGd0TUdNeE5URmtNRFV3Wm1WbSJ9"
 podman run -d \
     --name cf-tunnel \
     --net=host \
     --restart always \
     --security-opt label=disable \
-    -e TUNNEL_TOKEN="$CF_TUNNEL_TOKEN" \
+    -e TUNNEL_TOKEN="${CF_TUNNEL_TOKEN_WEBUI:-}" \
     -e TUNNEL_NO_AUTOUPDATE="true" \
     -e TUNNEL_ORIGIN_URL="http://localhost:${WEBUI_PORT}" \
     -e TUNNEL_DNS="ai.meigs.co.uk" \
-    -e TUNNEL_NO_AUTOUPDATE="true" \
     docker.io/cloudflare/cloudflared:latest \
     tunnel --no-autoupdate run --protocol http2
 
@@ -113,7 +117,6 @@ podman run -d \
     ghcr.io/open-webui/open-webui:v0.9.4
 
 # 8. Kokoro TTS Backend (Voice Synthesis)
-# Note: Using existing kokoro-backend container (or starting if not present)
 echo "🔊 Checking Kokoro TTS backend..."
 if ! podman ps -a | grep -q kokoro-backend; then
     echo "   Starting Kokoro TTS backend service..."
@@ -142,7 +145,6 @@ echo "  🦙 Ollama GPU:        http://localhost:${OLLAMA_PORT}"
 echo "  🤖 Open WebUI STT:    http://localhost:${WEBUI_PORT}"
 echo "  🔊 Kokoro TTS:        Running (voice synthesis)"
 echo "  🌐 External Access:   See profile-specific URLs above"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Cleanup temp tab config
