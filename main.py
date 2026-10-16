@@ -310,7 +310,7 @@ def run_voice_profile():
 
 
 def perform_startup_movements():
-    """Perform the startup movement sequence: Stretch, Wag Tail, Bark via local RPC."""
+    """Perform the startup movement sequence: Stretch, Sit, Wag Tail, Bark via local RPC."""
     import xmlrpc.client as xmlrpc_client
     
     rpc_url = "http://localhost:8001"
@@ -327,6 +327,18 @@ def perform_startup_movements():
             print(f"  ⚠ Stretch returned: {result}", file=sys.stderr)
     except Exception as e:
         print(f"  ⚠ Stretch movement failed (non-fatal): {e}", file=sys.stderr)
+    
+    time.sleep(1.0)
+    
+    # Sit (return to neutral stance after stretch)
+    try:
+        result = rpc_client.action('sit')
+        if result and result.get('status') == 'success':
+            print("  ✅ Sit completed", file=sys.stderr)
+        else:
+            print(f"  ⚠ Sit returned: {result}", file=sys.stderr)
+    except Exception as e:
+        print(f"  ⚠ Sit movement failed (non-fatal): {e}", file=sys.stderr)
     
     time.sleep(1.0)
     
