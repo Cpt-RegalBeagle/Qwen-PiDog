@@ -48,6 +48,7 @@ class PidogRPCHandler:
                 
             if hasattr(self.dog, 'do_action'):
                 self.dog.do_action(target_method_name)
+                self.dog.wait_all_done()
                 return {'status': 'success', 'message': f'Legacy action {target_method_name} triggered asynchronously'}
                 
             return {'status': 'error', 'message': f'Action {target_method_name} not supported by hardware'}
@@ -61,6 +62,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.head_move(target)
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': f'Head moved to {target}'}
         except Exception:
             raise Exception("Head move error")
@@ -116,6 +118,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('wag_tail')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Wagging tail'}
         except Exception:
             return {'status': 'error', 'message': 'Wag tail error'}
@@ -132,19 +135,6 @@ class PidogRPCHandler:
             }
         except Exception:
             return {'status': 'error', 'message': 'Status check failed', 'initialized': False}
-    
-    def test(self, test_name: str):
-        """Run hardware test"""
-        if not self.dog:
-            raise Exception("Hardware not initialized")
-        
-        try:
-            self.dog.do_action('sit')
-            self.dog.wait_all_done()
-            time.sleep(1)
-            return {'status': 'success', 'test': 'sit'}
-        except Exception:
-            raise Exception("Test error")
     
     def rgb_strip_set_mode(self, mode: str, color: str = 'green'):
         """Set RGB strip mode - accepts mode, color as positional arguments (SDK only supports 2 args)"""
@@ -547,6 +537,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('stretch')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Stretching'}
         except Exception:
             raise Exception("Stretch error")
@@ -558,6 +549,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('push_up')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Doing push-ups'}
         except Exception:
             raise Exception("Push up error")
@@ -569,6 +561,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('doze_off')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Dozing off'}
         except Exception:
             raise Exception("Doze off error")
@@ -580,6 +573,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('twist_body')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Twisting body'}
         except Exception:
             raise Exception("Twist body error")
@@ -591,6 +585,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('feet_shake')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Shaking feet'}
         except Exception:
             raise Exception("Feet shake error")
@@ -602,6 +597,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('handshake')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Handshaking'}
         except Exception:
             raise Exception("Handshake error")
@@ -613,6 +609,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('high_five')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'High fiving'}
         except Exception:
             raise Exception("High five error")
@@ -624,6 +621,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('lick_hand')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Licking hand'}
         except Exception:
             raise Exception("Lick hand error")
@@ -635,6 +633,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('scratch')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Scratching'}
         except Exception:
             raise Exception("Scratch error")
@@ -646,6 +645,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('fluster')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Flustered'}
         except Exception:
             raise Exception("Fluster error")
@@ -657,6 +657,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('surprise')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Surprised'}
         except Exception:
             raise Exception("Surprise error")
@@ -668,6 +669,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('think')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Thinking'}
         except Exception:
             raise Exception("Think error")
@@ -679,6 +681,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('recall')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Recalling'}
         except Exception:
             raise Exception("Recall error")
@@ -690,6 +693,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('relax_neck')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Relaxing neck'}
         except Exception:
             raise Exception("Relax neck error")
@@ -701,6 +705,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('lie_with_hands_out')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Lying with hands out'}
         except Exception:
             raise Exception("Lie with hands out error")
@@ -712,6 +717,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('trot')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Trotting'}
         except Exception:
             raise Exception("Trot error")
@@ -723,6 +729,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('half_sit')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Half sitting'}
         except Exception:
             raise Exception("Half sit error")
@@ -734,6 +741,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('bark_harder')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Barking harder'}
         except Exception:
             raise Exception("Bark harder error")
@@ -745,6 +753,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('howling')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Howling'}
         except Exception:
             raise Exception("Howling error")
@@ -756,6 +765,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('waiting')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Waiting'}
         except Exception:
             raise Exception("Waiting error")
@@ -767,6 +777,7 @@ class PidogRPCHandler:
         
         try:
             self.dog.do_action('nod')
+            self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Nodding'}
         except Exception:
             raise Exception("Nod error")
@@ -799,6 +810,7 @@ class PidogRPCHandler:
             
             if hasattr(self.dog, 'head_move'):
                 self.dog.head_move([[target_yaw, 0, 0]], speed=80)
+                self.dog.wait_all_done()
             
             return {'status': 'success', 'message': f'Head turned to angle {target_yaw}', 'target_yaw': target_yaw}
         except Exception:
@@ -862,27 +874,6 @@ class PidogRPCHandler:
         """Exposes the internal latched sound vector memory to the network client."""
         return getattr(self, 'latched_azimuth', -1)
 
-    def look_at_angle(self, angle: int):
-        """Sweeps head servos smoothly toward the specified angle without blocking."""
-        if not self.dog:
-            return {'status': 'error', 'message': 'Hardware not initialized'}
-        
-        try:
-            target_yaw = 0
-            
-            if angle != -1 and angle != 0:
-                if angle <= 180:
-                    target_yaw = -int(angle * 0.5)
-                else:
-                    target_yaw = int((360 - angle) * 0.5)
-            
-            if hasattr(self.dog, 'head_move'):
-                self.dog.head_move([[target_yaw, 0, 0]], speed=80)
-            
-            return {'status': 'success', 'message': f'Head turned to angle {target_yaw}', 'target_yaw': target_yaw}
-        except Exception:
-            return {'status': 'error', 'message': 'Sound localization error'}
-
     def look_at_last_sound_source(self) -> bool:
         """Transforms our background-polled azimuth angle and clears the latch AFTER head movement."""
         if not self.dog:
@@ -903,13 +894,9 @@ class PidogRPCHandler:
             
             if hasattr(self.dog, 'head_move'):
                 self.dog.head_move([[target_yaw, 0, 0]], speed=75, immediately=True)
-                time.sleep(0.3)
+                self.dog.wait_all_done()
             
             self.latched_azimuth = -1
             return True
         except Exception:
             return False
-
-
-# Import time for test method
-import time
