@@ -1,0 +1,42 @@
+# ==================== SECRETS & CREDENTIALS ====================
+# This blocks your private keys and passwords from ever reaching GitHub
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+.ssh/
+
+# ==================== PYTHON ENVIRONMENT ====================
+# Ignores compiled Python files and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# ==================== DATA & CACHE ====================
+# Prevents state files, temporary audio files, and logs from being tracked
+.pytest_cache/
+.mypy_cache/
+*.pkl
+*.wav
+*.mp3
+*.log
+
+# ==================== OS SPECIFIC ====================
+# Clears out background system files
+.DS_Store
+Thumbs.db
+
+# ==================== OS SPECIFIC ====================
+# AI Related session files
+
+claude.md
+.aider/
+.aider*
+CONVENTIONS.md
+Sunfounder SDK/
+
