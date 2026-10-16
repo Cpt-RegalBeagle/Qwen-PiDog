@@ -309,6 +309,61 @@ def run_voice_profile():
         return False
 
 
+def perform_startup_movements():
+    """Perform the startup movement sequence: Stretch, Wag Tail, Bark via local RPC."""
+    import xmlrpc.client as xmlrpc_client
+    
+    rpc_url = "http://localhost:8001"
+    rpc_client = xmlrpc_client.ServerProxy(rpc_url)
+    
+    print("\n🐕 Performing startup movements...", file=sys.stderr)
+    
+    # Stretch
+    try:
+        result = rpc_client.stretch()
+        if result and result.get('status') == 'success':
+            print("  ✅ Stretch completed", file=sys.stderr)
+        else:
+            print(f"  ⚠ Stretch returned: {result}", file=sys.stderr)
+    except Exception as e:
+        print(f"  ⚠ Stretch movement failed (non-fatal): {e}", file=sys.stderr)
+    
+    time.sleep(1.0)
+    
+    # Wag Tail
+    try:
+        result = rpc_client.wag_tail()
+        if result and result.get('status') == 'success':
+            print("  ✅ Wag tail started", file=sys.stderr)
+            time.sleep(4.0)
+            rpc_client.tail_stop()
+            time.sleep(1.0)
+            print("  ✅ Wag tail completed", file=sys.stderr)
+        else:
+            print(f"  ⚠ Wag tail returned: {result}", file=sys.stderr)
+    except Exception as e:
+        print(f"  ⚠ Wag tail movement failed (non-fatal): {e}", file=sys.stderr)
+        try:
+            rpc_client.tail_stop()
+        except Exception:
+            pass
+    
+    time.sleep(1.0)
+    
+    # Bark
+    try:
+        result = rpc_client.head_bark()
+        if result and result.get('status') == 'success':
+            print("  ✅ Bark completed", file=sys.stderr)
+        else:
+            print(f"  ⚠ Bark returned: {result}", file=sys.stderr)
+    except Exception as e:
+        print(f"  ⚠ Bark movement failed (non-fatal): {e}", file=sys.stderr)
+    
+    time.sleep(1.0)
+    print("  🐕 Startup movements complete!", file=sys.stderr)
+
+
 def cleanup_and_exit(return_code: int):
     """Unified cleanup function that runs before exit"""
     print("\n🛑 Ensuring hardware cleanup...")
@@ -419,7 +474,10 @@ Examples:
         # CRITICAL FIX: Pre-heat Ollama model before voice profile loads
         print("  🔥 Pre-heating Ollama model 'buddy:latest' for instant response...", file=sys.stderr)
         _pre_heat_ollama_model()
-            
+        
+        # Perform startup movements before voice module loads
+        perform_startup_movements()
+        
         # CRITICAL FIX: Launch voice profile IMMEDIATELY after port verification
         print("\n🎤 Launching Voice Profile Module immediately...", file=sys.stderr)
         
