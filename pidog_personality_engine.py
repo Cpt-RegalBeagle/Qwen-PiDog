@@ -1,0 +1,130 @@
+"""
+pidog_personality_engine.py
+Background thread that scans AI response text for personality triggers
+and fires matching RPC actions in fire-and-forget daemon threads.
+
+Integration (ONE line in pidog_voice_audio.py, inside _stream_and_speak):
+
+    from pidog_personality_engine import personality_queue
+    personality_queue.put(full_response)
+
+That is the only modification to the voice module.
+"""
+
+import queue
+import threading
+import time
+import logging
+
+from pidog_personality_config import (
+    PERSONALITY_MAP,
+    COOLDOWN_SECONDS,
+    MAX_ACTIONS_PER_MESSAGE,
+    ENABLED,
+)
+
+log = logging.getLogger("pidog.personality")
+
+# Shared queue: voice module puts text here, engine thread reads it.
+personality_queue = queue.Queue(maxsize=64)
+
+# Internal state
+_last_fire = {}
+_engine_thread = None
+_shutdown = threading.Event()
+
+
+def _fire_rpc(rpc_client, method_name, args):
+    """Fire a single RPC call in a daemon thread. Never raises."""
+    def _worker():
+        try:
+            method = getattr(rpc_client, method_name, None)
+        except Exception:
+            return
+        if method is None:
+            return
+        try:
+            if args:
+                method(*args)
+            else:
+                method()
+        except Exception:
+            pass
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+
+
+def _check_cooldown(method_name):
+    """Return True if the action is allowed (not in cooldown)."""
+    now = time.monotonic()
+    last = _last_fire.get(method_name)
+    if last is None:
+        return True
+    if (now - last) < COOLDOWN_SECONDS:
+        return False
+    return True
+
+
+def _scan_text(text, rpc_client):
+    """Scan text for triggers, fire up to MAX_ACTIONS_PER_MESSAGE actions."""
+    if not ENABLED:
+        return
+    if not text or not isinstance(text, str):
+        return
+    if not rpc_client:
+        return
+
+    lowered = text.lower()
+    fired = 0
+
+    for phrase, (method_name, args) in PERSONALITY_MAP.items():
+        if fired >= MAX_ACTIONS_PER_MESSAGE:
+            break
+        if phrase.lower() not in lowered:
+            continue
+        if not _check_cooldown(method_name):
+            continue
+        _last_fire[method_name] = time.monotonic()
+        _fire_rpc(rpc_client, method_name, args)
+        fired += 1
+        log.debug("personality: fired '%s' (trigger: '%s')", method_name, phrase)
+
+
+def _engine_loop(rpc_client):
+    """Main loop: pull text from queue, scan, fire."""
+    log.info("Personality engine started.")
+    while not _shutdown.is_set():
+        try:
+            text = personality_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        try:
+            _scan_text(text, rpc_client)
+        except Exception:
+            pass
+    log.info("Personality engine stopped.")
+
+
+def start_personality_engine(rpc_client):
+    """
+    Launch the personality engine thread.
+    Call once from main.py after the RPC client is ready.
+    """
+    global _engine_thread
+    if _engine_thread is not None and _engine_thread.is_alive():
+        return
+    _shutdown.clear()
+    _engine_thread = threading.Thread(
+        target=_engine_loop,
+        args=(rpc_client,),
+        daemon=True,
+        name="pidog-personality",
+    )
+    _engine_thread.start()
+
+
+def stop_personality_engine():
+    """Signal the engine thread to exit. Call during cleanup."""
+    _shutdown.set()
+    if _engine_thread is not None:
+        _engine_thread.join(timeout=3.0)

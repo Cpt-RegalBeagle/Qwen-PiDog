@@ -17,6 +17,8 @@ from pidog_voice_rpc import (
     _critical_error_exit
 )
 
+from pidog_personality_engine import personality_queue
+
 # ==================== MODULE-LEVEL GLOBALS ====================
 is_running = True
 shutdown_requested = False
@@ -267,6 +269,9 @@ def _stream_and_speak(response):
 
                 except json.JSONDecodeError:
                     pass
+
+        # Personality engine: scan AI response for trigger words (non-blocking)
+        personality_queue.put(full_response)
 
         # Convert the full response to speech
         _speak_text(full_response)
