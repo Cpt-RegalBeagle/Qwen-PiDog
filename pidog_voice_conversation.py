@@ -175,4 +175,72 @@ def _start_idle_listener_loop():
             print("  [IDLE] Idle listener loop initialized. Polling server for sound detection...", file=sys.stderr, flush=True)
 
             while is_running and not shutdown_requested:
-                # CRITICAL FIX:
+                if _check_server_sound_detected():
+                    print("  [IDLE] Server detected sound! Triggering capture phase...", file=sys.stderr, flush=True)
+
+                    # Capture azimuth ONCE at phase transition - BEFORE VAD loop starts
+                    try:
+                        active_cycle_azimuth = _rpc_call_with_timeout('get_latched_azimuth')
+                        print("  [IDLE] Captured active_cycle_azimuth: %s" % active_cycle_azimuth, file=sys.stderr, flush=True)
+
+                        if active_cycle_azimuth == -1 or active_cycle_azimuth == 0:
+                            print("  [IDLE] Server azimuth not ready, waiting 50ms...", file=sys.stderr, flush=True)
+                            time.sleep(0.05)
+                            active_cycle_azimuth = _rpc_call_with_timeout('get_latched_azimuth')
+                        else:
+                            print("  [IDLE] Active cycle azimuth cached: %s" % active_cycle_azimuth, file=sys.stderr, flush=True)
+                    except Exception as e:
+                        print("  [IDLE] Warning: Could not capture initial azimuth: %s" % e, file=sys.stderr)
+                        active_cycle_azimuth = -1
+
+                    # Start local VAD recording loop NOW with cached azimuth
+                    _start_audio_worker()
+
+                    # Exit idle listener - audio worker will handle the rest
+                    break
+
+                # Poll every 500ms to balance responsiveness and CPU usage
+                time.sleep(0.5)
+
+        # CRITICAL FIX: Use Daemon thread so it closes instantly on shutdown signal
+        idle_listener_thread = threading.Thread(target=_idle_listener_loop, daemon=True)
+        idle_listener_thread.start()
+        print("  [IDLE] Idle listener thread started", file=sys.stderr, flush=True)
+        print("  [TIME] %s - Idle listener PID: %d" % (time.strftime('%H:%M:%S'), idle_listener_thread.ident), file=sys.stderr, flush=True)
+
+    except Exception as e:
+        print("  [IDLE] Idle listener failed: %s" % e, file=sys.stderr, flush=True)
+        _critical_error_exit("Idle listener initialization failed")
+
+
+def _check_server_sound_detected() -> bool:
+    """Poll server-side ears tracking to check if sound has been detected (non-destructive read)"""
+    global last_processed_azimuth
+
+    try:
+        # Non-destructive read: get_latched_azimuth returns an int, does NOT clear the latch
+        result = _rpc_call_with_timeout('get_latched_azimuth')
+
+        if not isinstance(result, int):
+            return False
+
+        # Reject invalid or stale values
+        if result == -1 or result == 0:
+            return False
+
+        # Reject if same as last processed (no new sound event)
+        if result == last_processed_azimuth:
+            return False
+
+        # Fresh valid azimuth detected
+        print("  [IDLE] Fresh azimuth detected: %d (last: %d)" % (result, last_processed_azimuth), file=sys.stderr, flush=True)
+        last_processed_azimuth = result
+        return True
+
+    except Exception as e:
+        print("  [IDLE] Server poll error (non-fatal): %s" % e, file=sys.stderr, flush=True)
+        return False
+
+
+if __name__ == '__main__':
+    main()
