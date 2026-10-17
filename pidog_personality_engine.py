@@ -9,6 +9,9 @@ Integration (ONE line in pidog_voice_audio.py, inside _stream_and_speak):
     personality_queue.put(full_response)
 
 That is the only modification to the voice module.
+
+Matching is case-insensitive: "Yes" (sentence start) and "yes"
+(mid-sentence) both trigger the "yes" entry in PERSONALITY_ACTIONS.
 """
 
 import queue
@@ -16,11 +19,12 @@ import threading
 import time
 import sys
 
-from pidog_personality_config import (
-    PERSONALITY_MAP,
+from pidog_actions_dictionary import (
+    PERSONALITY_ACTIONS,
     COOLDOWN_SECONDS,
     MAX_ACTIONS_PER_MESSAGE,
     ENABLED,
+    RETURN_TO_SIT_AFTER_ACTION,
 )
 
 # Shared queue: voice module puts text here, engine thread reads it.
@@ -48,6 +52,13 @@ def _fire_rpc(rpc_client, method_name, args):
                 method()
         except Exception as e:
             print(f"  [PERSONALITY] RPC fire error on '{method_name}': {e}", file=sys.stderr, flush=True)
+            return
+        # Return to sitting position after personality action completes
+        if RETURN_TO_SIT_AFTER_ACTION:
+            try:
+                rpc_client.action('sit')
+            except Exception:
+                pass
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
 
@@ -64,7 +75,14 @@ def _check_cooldown(method_name):
 
 
 def _scan_text(text, rpc_client):
-    """Scan text for triggers, fire up to MAX_ACTIONS_PER_MESSAGE actions."""
+    """
+    Scan text for triggers, fire up to MAX_ACTIONS_PER_MESSAGE actions.
+
+    Matching is case-insensitive substring scan:
+      - "Yes, that's right!" matches trigger "yes" (capital Y, sentence start)
+      - "I think yes is correct" matches trigger "yes" (lowercase, mid-sentence)
+    Both forms are detected because we compare lowered text against lowered phrases.
+    """
     if not ENABLED:
         return
     if not text or not isinstance(text, str):
@@ -75,7 +93,7 @@ def _scan_text(text, rpc_client):
     lowered = text.lower()
     fired = 0
 
-    for phrase, (method_name, args) in PERSONALITY_MAP.items():
+    for phrase, (method_name, args) in PERSONALITY_ACTIONS.items():
         if fired >= MAX_ACTIONS_PER_MESSAGE:
             break
         if phrase.lower() not in lowered:
