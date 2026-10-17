@@ -28,143 +28,144 @@ last_processed_azimuth = -1
 audio_worker_thread = None
 
 
+def _capture_direction():
+    """One-shot read of the SoundDirection SPI sensor via RPC. Returns angle or -1."""
+    try:
+        az = _rpc_call_with_timeout('read_sound_direction')
+        if isinstance(az, int) and az >= 0:
+            return az
+        return -1
+    except Exception as e:
+        print(f"  [AUDIO] Direction read warning (non-fatal): {e}", file=sys.stderr, flush=True)
+        return -1
+
+
+def _init_session_file(audio_file, session_file):
+    """Copy the first triggered VAD chunk into the session file."""
+    try:
+        shutil.copyfile(audio_file, session_file)
+    except Exception as e:
+        print(f"  [AUDIO] Session initialization error: {e}", file=sys.stderr, flush=True)
+
+
+def _append_audio_chunk(audio_file, session_file):
+    """Append raw PCM bytes from a 1s chunk to the session file, skipping the WAV header."""
+    try:
+        with open(audio_file, 'rb') as f_in, open(session_file, 'ab') as f_out:
+            f_in.seek(44)
+            f_out.write(f_in.read())
+    except Exception as e:
+        print(f"  [AUDIO] Byte compilation error: {e}", file=sys.stderr, flush=True)
+
+
+def _patch_wav_header(session_file):
+    """Overwrite WAV header size fields to reflect all appended PCM bytes."""
+    try:
+        file_size = os.path.getsize(session_file)
+        if file_size <= 44:
+            return
+        with open(session_file, 'r+b') as f_patch:
+            f_patch.seek(4)
+            f_patch.write(struct.pack('<I', file_size - 8))
+            f_patch.seek(40)
+            f_patch.write(struct.pack('<I', file_size - 44))
+        print(f"  [AUDIO] Patched WAV container size ({file_size} bytes total)", file=sys.stderr, flush=True)
+    except Exception as header_err:
+        print(f"  [AUDIO] WAV size patch warning: {header_err}", file=sys.stderr, flush=True)
+
+
+def _align_head_to_azimuth(azimuth):
+    """Move head to the logged azimuth angle via RPC."""
+    if azimuth == -1 or azimuth == 0:
+        print("  [AUDIO] No valid azimuth, skipping head move", file=sys.stderr, flush=True)
+        return
+    try:
+        _rpc_call_with_timeout('look_at_angle', azimuth)
+        print(f"  [AUDIO] Head aligned to azimuth: {azimuth}", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"  [AUDIO] Head alignment warning (non-fatal): {e}", file=sys.stderr, flush=True)
+
+
+def _reset_rgb_idle():
+    """Set RGB strip back to idle green breathing."""
+    try:
+        _rpc_call('rgb_strip_set_mode', 'breath', 'green')
+    except Exception as e:
+        print(f"  [AUDIO] RGB reset warning (non-fatal): {e}", file=sys.stderr, flush=True)
+
+
+def _finalize_and_dispatch(session_file, azimuth):
+    """Head move, patch header, send to STT - called when silence threshold is met."""
+    _align_head_to_azimuth(azimuth)
+    _patch_wav_header(session_file)
+    print("  [AUDIO] Dispatching compiled session to STT...", file=sys.stderr, flush=True)
+    _send_audio_to_stt(session_file)
+
+
 def _start_audio_worker():
     """Start audio worker thread for microphone input"""
     global audio_worker_thread
 
     try:
         def _audio_worker_loop():
-            """Streamlined, non-blocking single-pass recording worker loop with VAD."""
             global is_running, shutdown_requested, wakeup_azimuth
             print("  [AUDIO] Audio worker loop initialized successfully.", file=sys.stderr, flush=True)
 
             audio_file = config.PI_DOG_AUDIO_FILE
             session_file = "/tmp/buddy_session.wav"
+            SPEECH_THRESHOLD = 20.0
+            silence_seconds = 0
+            is_recording_speech = False
 
-            try:
-                # Calibrated baseline matching our real-world hardware gain data
-                SPEECH_THRESHOLD = 20.0
-                silence_seconds = 0
-                is_recording_speech = False
+            print("  [AUDIO] Dynamic VAD engine initialized. Idling for voice activity...", file=sys.stderr, flush=True)
 
-                print("  [AUDIO] Dynamic VAD engine initialized. Idling for voice activity...", file=sys.stderr, flush=True)
+            while is_running and not shutdown_requested:
+                # Phase 1: VAD - record 1s snippet from the recording mic (sound card)
+                result = _rpc_call_with_timeout('audio_record', 1, audio_file)
+                if not result or result.get('status') != 'success':
+                    time.sleep(0.5)
+                    continue
 
-                while is_running and not shutdown_requested:
-                    # Target a quick 1-second snippet from the server to monitor room volume
-                    result = _rpc_call_with_timeout('audio_record', 1, audio_file)
+                current_volume = get_wav_volume(audio_file)
+                print(f"  [AUDIO VAD] Monitor Vol: {current_volume:.1f} (Threshold: {SPEECH_THRESHOLD})", file=sys.stderr, flush=True)
 
-                    if not result or result.get('status') != 'success':
-                        time.sleep(0.5)
+                if not is_recording_speech:
+                    # State A: Listening for speech trigger on recording mic
+                    if current_volume <= SPEECH_THRESHOLD:
                         continue
 
-                    current_volume = get_wav_volume(audio_file)
-                    print(f"  [AUDIO VAD] Monitor Vol: {current_volume:.1f} (Threshold: {SPEECH_THRESHOLD})", file=sys.stderr, flush=True)
+                    # Phase 2: VAD hit - one-shot read of SoundDirection SPI sensor
+                    wakeup_azimuth = _capture_direction()
+                    print(f"  [AUDIO] Sound direction captured: {wakeup_azimuth}", file=sys.stderr, flush=True)
 
-                    if not is_recording_speech:
-                        # State A: Listening for initial human speech trigger
-                        if current_volume > SPEECH_THRESHOLD:
-                            # CRITICAL FIX: Capture azimuth IMMEDIATELY when speech detected
-                            # This stores the "pre-echo" vector before ears are paused
-                            try:
-                                wakeup_azimuth = _rpc_call_with_timeout('get_latched_azimuth')
-                                print(f"  [AUDIO] Captured wakeup azimuth: {wakeup_azimuth}", file=sys.stderr, flush=True)
-                            except Exception as e:
-                                print(f"  [AUDIO] Warning: Could not capture initial azimuth: {e}", file=sys.stderr)
+                    # Phase 3: Brief settle - let SPI/GPIO bus release before next mic capture
+                    time.sleep(0.5)
 
-                            # CRITICAL FIX: Pause ears monitor to prevent GPIO conflicts during audio capture
-                            try:
-                                _rpc_call_with_timeout('pause_ears_monitor')
-                                print(f"  [AUDIO] Ears monitoring paused for audio capture", file=sys.stderr, flush=True)
-                            except Exception as e:
-                                print(f"  [AUDIO] Ears pause warning (non-fatal): {e}", file=sys.stderr)
+                    # Phase 4: Initialize session file and transition to recording
+                    _init_session_file(audio_file, session_file)
+                    is_recording_speech = True
+                    print(f"  [AUDIO] Speech detected - entering recording state", file=sys.stderr, flush=True)
+                else:
+                    # State B: Accumulate audio from recording mic
+                    _append_audio_chunk(audio_file, session_file)
 
-                            # Initialize our clean session file by copying the first triggered chunk over
-                            try:
-                                shutil.copyfile(audio_file, session_file)
-                            except Exception as e:
-                                print(f"  [AUDIO] Session initialization error: {e}", file=sys.stderr)
-
-                            # CRITICAL FIX: Transition to State B so we start accumulating audio
-                            is_recording_speech = True
-                            print(f"  [AUDIO] Speech detected - entering recording state", file=sys.stderr, flush=True)
-                        else:
-                            continue
+                    if current_volume < SPEECH_THRESHOLD:
+                        silence_seconds += 1
                     else:
-                        # State B: Human is speaking. Accumulate bytes inline.
-                        try:
-                            # Append the fresh 1-second raw PCM audio bytes to our session file
-                            with open(audio_file, 'rb') as f_in, open(session_file, 'ab') as f_out:
-                                f_in.seek(44)  # Skip the individual chunk's WAV header to prevent corrupted headers inside the PCM body
-                                f_out.write(f_in.read())
-                        except Exception as e:
-                            print(f"  [AUDIO] Byte compilation error: {e}", file=sys.stderr)
+                        silence_seconds = 0
 
-                        # Monitor silence frames
-                        if current_volume < SPEECH_THRESHOLD:
-                            silence_seconds += 1
-                            print(f"  [AUDIO] Silence tracking: {silence_seconds}/4 seconds...", file=sys.stderr, flush=True)
-                        else:
-                            silence_seconds = 0
+                    print(f"  [AUDIO] Silence tracking: {silence_seconds}/4 seconds...", file=sys.stderr, flush=True)
 
-                        # If we hit 4 consecutive seconds of silence, the human is fully done talking!
-                        if silence_seconds >= 4:
-                            print("  [AUDIO] 4-Second silence threshold reached. Closing session.", file=sys.stderr, flush=True)
+                    if silence_seconds >= 4:
+                        # Phase 5: Recording complete - head move, STT, reset
+                        print("  [AUDIO] 4-Second silence threshold reached. Closing session.", file=sys.stderr, flush=True)
+                        _finalize_and_dispatch(session_file, wakeup_azimuth)
+                        is_recording_speech = False
+                        silence_seconds = 0
+                        wakeup_azimuth = -1
+                        print("  [AUDIO] Lockout cleared. Returning to idle listener.\n", file=sys.stderr, flush=True)
+                        _reset_rgb_idle()
 
-                            # CRITICAL FIX: Align head using STORED wakeup_azimuth BEFORE STT dispatch
-                            # This ensures we use the vector captured when speech was first detected
-                            try:
-                                if wakeup_azimuth != -1 and wakeup_azimuth != 0:
-                                    _rpc_call_with_timeout('look_at_angle', wakeup_azimuth)
-                                    print(f"  [AUDIO] Head aligned to stored wakeup azimuth: {wakeup_azimuth}", file=sys.stderr, flush=True)
-                                else:
-                                    print("  [AUDIO] Warning: No valid wakeup azimuth captured", file=sys.stderr, flush=True)
-                            except Exception as e:
-                                print(f"  [AUDIO] Head alignment warning (non-fatal): {e}", file=sys.stderr)
-
-                            print("  [AUDIO] Dispatching compiled session to STT...", file=sys.stderr, flush=True)
-
-                            # CRITICAL CONTAINER FIX: Overwrite the WAV header sizes to reflect all appended bytes
-                            try:
-                                file_size = os.path.getsize(session_file)
-                                if file_size > 44:
-                                    with open(session_file, 'r+b') as f_patch:
-                                        # Update ChunkSize (Total File Size - 8 bytes) at byte offset 4
-                                        f_patch.seek(4)
-                                        f_patch.write(struct.pack('<I', file_size - 8))
-                                        # Update Subchunk2Size (Data payload size) at byte offset 40
-                                        f_patch.seek(40)
-                                        f_patch.write(struct.pack('<I', file_size - 44))
-                                    print(f"  [AUDIO] Patched WAV container size properties dynamically ({file_size} bytes total)", file=sys.stderr, flush=True)
-                            except Exception as header_err:
-                                print(f"  [AUDIO] WAV size patch warning: {header_err}", file=sys.stderr)
-
-                            # 1. Forward the fully compiled variable-length session file to STT
-                            _send_audio_to_stt(session_file)
-
-                            # Drive tracking servos using stored wakeup azimuth again for consistency
-                            try:
-                                if wakeup_azimuth != -1 and wakeup_azimuth != 0:
-                                    _rpc_call_with_timeout('look_at_angle', wakeup_azimuth)
-                                    print(f"  [AUDIO] Head aligned to stored wakeup azimuth (second pass): {wakeup_azimuth}", file=sys.stderr, flush=True)
-                            except Exception as e:
-                                print(f"  [AUDIO] Second alignment warning (non-fatal): {e}", file=sys.stderr)
-
-                            # Reset states and clean up heading tracker for the next cycle
-                            captured_heading = -1
-                            is_recording_speech = False
-                            silence_seconds = 0
-                            wakeup_azimuth = -1  # CRITICAL FIX: Clear stored azimuth after use
-                            print("  [AUDIO] Lockout cleared. Returning to idle listener.\n", file=sys.stderr, flush=True)
-
-                            # RGB: BREATH GREEN - back to idle listening state (step 3 of the cycle)
-                            try:
-                                _rpc_call('rgb_strip_set_mode', 'breath', 'green')
-                            except Exception as e:
-                                print(f"  [AUDIO] RGB reset warning (non-fatal): {e}", file=sys.stderr)
-            except Exception as e:
-                print(f"  [AUDIO] Audio worker thread exception: {e}", file=sys.stderr, flush=True)
-
-        # CRITICAL FIX: Use Daemon thread so it closes instantly on shutdown signal
         audio_worker_thread = threading.Thread(target=_audio_worker_loop, daemon=True)
         audio_worker_thread.start()
         print("  [AUDIO] Audio worker thread started", file=sys.stderr, flush=True)
@@ -183,28 +184,24 @@ def _send_audio_to_stt(audio_file: str):
 
         print(f"  [STT] Sending audio to {stt_url}", file=sys.stderr)
 
-        # RGB: BREATH YELLOW - processing/active state (step 2 of the cycle)
         try:
             _rpc_call('rgb_strip_set_mode', 'breath', 'yellow')
         except Exception as e:
-            print(f"  [STT] RGB set warning (non-fatal): {e}", file=sys.stderr)
+            print(f"  [STT] RGB set warning (non-fatal): {e}", file=sys.stderr, flush=True)
 
         headers = {
             "Authorization": f"Bearer {config.WEBUI_API_KEY}"
         }
 
-        # Read the audio file content
         with open(audio_file, 'rb') as f:
             audio_data = f.read()
 
-        # FIX: OpenWebUI expects multipart form upload with field name 'file'
         response = requests.post(
             stt_url,
             headers=headers,
             files={'file': (os.path.basename(audio_file), audio_data, 'audio/wav')}
         )
 
-        # Only exit on critical errors - 422 is not always fatal
         if response.status_code == 500 or response.status_code == 503:
             print(f"  [STT] CRITICAL: OpenWebUI server error, exiting...", file=sys.stderr, flush=True)
             _critical_error_exit("STT server unavailable")
@@ -220,7 +217,6 @@ def _send_audio_to_stt(audio_file: str):
             print(f"  [STT] Unexpected response {response.status_code}: {response.text[:200]}", file=sys.stderr, flush=True)
 
     except Exception as e:
-        # Don't exit on every STT error - just log and continue
         print(f"  [STT] Error processing audio (non-fatal): {e}", file=sys.stderr, flush=True)
 
 
@@ -232,7 +228,6 @@ def _process_conversation(text: str):
 
         print(f"  [LLM] Sending request to {ollama_url}", file=sys.stderr)
 
-        # CRITICAL FIX: Add keep_alive=-1 to lock buddy:latest in memory permanently
         payload = {
             "model": config.TARGET_MODEL,
             "keep_alive": -1,
@@ -250,7 +245,6 @@ def _process_conversation(text: str):
             _stream_and_speak(response)
 
     except Exception as e:
-        # Don't exit on every LLM error - just log and continue
         print(f"  [LLM] Error processing conversation (non-fatal): {e}", file=sys.stderr, flush=True)
 
 
@@ -266,18 +260,13 @@ def _stream_and_speak(response):
                     data = json.loads(line)
                     message = data.get("message", {}).get("content", "")
                     full_response += message
-
                 except json.JSONDecodeError:
                     pass
 
-        # Personality engine: scan AI response for trigger words (non-blocking)
         personality_queue.put(full_response)
-
-        # Convert the full response to speech
         _speak_text(full_response)
 
     except Exception as e:
-        # Don't exit on every TTS error - just log and continue
         print(f"  [TTS] Error streaming response (non-fatal): {e}", file=sys.stderr, flush=True)
 
 
@@ -296,7 +285,6 @@ def _speak_text(text: str):
             "Content-Type": "application/json"
         }
 
-        # CRITICAL FIX: Use OpenAI-compatible payload structure for Kokoro
         payload = {
             "model": config.TTS_MODEL,
             "input": text,
@@ -310,10 +298,8 @@ def _speak_text(text: str):
         if response.status_code == 200:
             print(f"  [TTS] TTS complete, playing audio...", file=sys.stderr)
 
-            # CRITICAL FIX: Set speaking lock BEFORE playback starts to prevent self-transcription!
             is_speaking = True
 
-            # Play the audio
             audio_data = response.content
             audio_file = "/tmp/temp_audio.wav"
             with open(audio_file, 'wb') as f:
@@ -321,64 +307,26 @@ def _speak_text(text: str):
 
             print(f"  [AUDIO] Audio file written ({len(audio_data)} bytes), playing...", file=sys.stderr)
 
-            # CRITICAL FIX: Use RPC to play music instead of direct dog.music call
             if pidog_voice_rpc.rpc_client is not None:
                 _rpc_call('music_play_file', audio_file)
 
-            # CRITICAL FIX: 9-SECOND SAFETY LOCKOUT - Execute AFTER playback command starts
-            # This window covers the physical audio playback duration + network latency buffer
+            # 9-SECOND SAFETY LOCKOUT - covers physical playback + echo resolution
             print(f"  [AUDIO] Safety lockout active: Waiting 9.0 seconds for voice rendering and echo resolution...", file=sys.stderr, flush=True)
             time.sleep(9.0)
 
-            # CRITICAL FIX: STOP LOCAL VAD RECORDING STREAM FIRST - Free up hardware line!
-            print(f"  [AUDIO] Stopping local VAD recording stream to release GPIO resources...", file=sys.stderr, flush=True)
-
-            # CRITICAL FIX: Audio worker is daemon thread - no explicit stop needed
-            # Just clear the shutdown flag and let it exit naturally
-            shutdown_requested = True
-
-            # CRITICAL FIX: NOW execute RPC resume call AFTER local stream is closed
-            print(f"  [AUDIO] Executing server-side ears monitor resume handshake...", file=sys.stderr, flush=True)
-
-            try:
-                _rpc_call_with_timeout('resume_ears_monitor')
-                print(f"  [AUDIO] Server-side ears monitoring resumed successfully", file=sys.stderr, flush=True)
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "gpio busy" in error_msg or "permission denied" in error_msg:
-                    print(f"  [AUDIO] CRITICAL: GPIO bus conflict during resume! {e}", file=sys.stderr, flush=True)
-                    _critical_error_exit("GPIO hardware lockup - ears monitor failed")
-                else:
-                    print(f"  [AUDIO] Ears resume warning (non-fatal): {e}", file=sys.stderr, flush=True)
-
-            # CRITICAL FIX: Hardware settle delay - let Pi finish initializing SoundDirection class
-            print(f"  [AUDIO] Hardware settle delay: Waiting 0.5 seconds for GPIO bus to clear...", file=sys.stderr, flush=True)
+            # Hardware settle delay - let Pi finish releasing audio hardware
+            print(f"  [AUDIO] Hardware settle delay: Waiting 0.5 seconds for audio bus to clear...", file=sys.stderr, flush=True)
             time.sleep(0.5)
 
-            # CRITICAL FIX: NOW execute RPC resume call AFTER local stream is closed AND alignment is done
-            # This ensures azimuth buffer is fresh for NEXT conversation cycle, not current one
-            print(f"  [AUDIO] Executing server-side ears monitor resume handshake...", file=sys.stderr, flush=True)
-
-            try:
-                _rpc_call_with_timeout('resume_ears_monitor')
-                print(f"  [AUDIO] Server-side ears monitoring resumed successfully", file=sys.stderr, flush=True)
-            except Exception as e:
-                error_msg = str(e).lower()
-                if "gpio busy" in error_msg or "permission denied" in error_msg:
-                    print(f"  [AUDIO] CRITICAL: GPIO bus conflict during resume! {e}", file=sys.stderr, flush=True)
-                    _critical_error_exit("GPIO hardware lockup - ears monitor failed")
-                else:
-                    print(f"  [AUDIO] Ears resume warning (non-fatal): {e}", file=sys.stderr, flush=True)
-
-            # Reset state flags for next cycle
+            # Reset state flags for next VAD cycle
+            is_speaking = False
             is_running = True
             shutdown_requested = False
-            last_processed_azimuth = -1  # CRITICAL FIX: Reset freshness tracker for next conversation cycle
+            last_processed_azimuth = -1
 
-            print(f"  [AUDIO] Server-side ears monitoring ready for next cycle", file=sys.stderr, flush=True)
+            print(f"  [AUDIO] Software lock released. Ready for next VAD cycle.", file=sys.stderr, flush=True)
 
     except Exception as e:
-        # Don't exit on every audio error - just log and continue
         print(f"  [AUDIO] Error playing audio (non-fatal): {e}", file=sys.stderr, flush=True)
 
 
@@ -393,7 +341,7 @@ def get_wav_volume(file_path):
 
     try:
         with open(file_path, 'rb') as f:
-            f.seek(44)  # Skip standard WAV header lines
+            f.seek(44)
             data = f.read()
             count = len(data) / 2
             if count == 0:

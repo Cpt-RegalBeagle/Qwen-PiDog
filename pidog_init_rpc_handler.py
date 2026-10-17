@@ -824,7 +824,6 @@ class PidogRPCHandler:
                 else:
                     target_yaw = int((360 - angle) * 0.5)
 
-            # Clamp to mechanical head range to prevent servo overdrive
             target_yaw = max(-75, min(75, target_yaw))
 
             if hasattr(self.dog, 'head_move'):
@@ -834,6 +833,27 @@ class PidogRPCHandler:
             return {'status': 'success', 'message': f'Head turned to angle {target_yaw}', 'target_yaw': target_yaw}
         except Exception:
             return {'status': 'error', 'message': 'Sound localization error'}
+
+    def read_sound_direction(self) -> int:
+        """One-shot active read of the SoundDirection SPI sensor. Returns angle 0-355 or -1 if no detection."""
+        if not self.dog:
+            return -1
+
+        try:
+            if not hasattr(self.dog, 'ears'):
+                return -1
+
+            if not self.dog.ears.isdetected():
+                return -1
+
+            val = self.dog.ears.read()
+            if isinstance(val, (int, float)) and val >= 0:
+                self.latched_azimuth = int(val)
+                return int(val)
+
+            return -1
+        except Exception:
+            return -1
 
     def pause_ears_monitor(self) -> bool:
         """Disables the tracking calculation without destroying the hardware context handles."""
@@ -868,7 +888,6 @@ class PidogRPCHandler:
         """Start background thread to continuously poll ears sensor. Safe to call multiple times."""
         import threading
 
-        # Guard: if a live ears thread already exists, do not spawn another
         if self._ears_thread is not None and self._ears_thread.is_alive():
             return
 
