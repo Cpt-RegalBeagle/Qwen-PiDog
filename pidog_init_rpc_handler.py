@@ -839,6 +839,7 @@ class PidogRPCHandler:
             # CRITICAL FIX: Clear stale azimuth BEFORE re-enabling tracking
             # This prevents reading cached values from previous conversation cycle
             self.latched_azimuth = -1
+            self.ears_tracking_allowed = True
             
             print("  [SERVER LOGIC] Ears tracking gate OPENED. Azimuth buffer flushed.", flush=True)
             
