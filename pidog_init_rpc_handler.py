@@ -865,9 +865,8 @@ class PidogRPCHandler:
         """Perform a single SPI read with up to 3 retry attempts on GPIO busy."""
         for attempt in range(3):
             try:
-                self._ears_spi_lock.acquire()
-                val = self.dog.ears.read()
-                self._ears_spi_lock.release()
+                with self._ears_spi_lock:
+                    val = self.dog.ears.read()
             except Exception as e:
                 print(f"  [EARS] Poll {poll_idx + 1}/3 attempt {attempt + 1} exception: {e}", file=sys.stderr, flush=True)
                 time.sleep(0.3)
