@@ -33,6 +33,7 @@ def _capture_direction():
     Skips isdetected() interrupt gate since human voice won't pull the hardware pin high."""
     try:
         az = _rpc_call_with_timeout('read_sound_direction_direct')
+        print(f"  [AUDIO] _capture_direction raw RPC return: {repr(az)} (type={type(az).__name__})", file=sys.stderr, flush=True)
         if isinstance(az, int) and az >= 0:
             return az
         return -1
@@ -137,7 +138,7 @@ def _start_audio_worker():
 
                     # Phase 2: VAD hit - Direct Poll Bypass of TR16F064B SPI registers
                     # Bypasses isdetected() since human voice won't flip the interrupt pin.
-                    # 3-poll rolling average stabilizes Phase-Difference noise.
+                    # 3-poll rolling average with settling delays stabilizes Phase-Difference noise.
                     wakeup_azimuth = _capture_direction()
                     print(f"  [AUDIO] Sound direction captured (direct poll): {wakeup_azimuth}", file=sys.stderr, flush=True)
 

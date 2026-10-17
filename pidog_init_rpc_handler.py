@@ -856,34 +856,50 @@ class PidogRPCHandler:
             return -1
 
     def _poll_ears_triple(self):
-        """Perform 3 rapid SPI reads of the TR16F064B direction register. Returns list of valid angles."""
+        """Perform 3 SPI reads of the TR16F064B direction register with inter-poll settling.
+        Returns list of valid angles (may be fewer than 3 if a poll fails)."""
         results = []
-        for _ in range(3):
+        # Let SPI bus settle after any prior hardware activity (arecord, etc.)
+        time.sleep(0.1)
+        for poll_idx in range(3):
+            if poll_idx > 0:
+                time.sleep(0.05)
             try:
                 val = self.dog.ears.read()
-            except Exception:
-                continue
-            if isinstance(val, (int, float)) and val >= 0:
-                results.append(int(val))
+                print(f"  [EARS] Poll {poll_idx + 1}/3 raw: {repr(val)} (type={type(val).__name__})", file=sys.stderr, flush=True)
+                if isinstance(val, (int, float)) and val >= 0:
+                    results.append(int(val))
+                else:
+                    print(f"  [EARS] Poll {poll_idx + 1}/3 rejected: not valid non-negative number", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"  [EARS] Poll {poll_idx + 1}/3 exception: {e}", file=sys.stderr, flush=True)
         return results
 
     def read_sound_direction_direct(self) -> int:
         """Direct Poll Bypass - skips isdetected() interrupt gate entirely.
         The TR16F064B continuously updates its Phase-Difference orientation registers over SPI
-        regardless of interrupt pin state. Performs 3 rapid polls and returns the rolling
-        window average to stabilize against lower-amplitude human voice noise."""
+        regardless of interrupt pin state. Performs 3 rapid polls with settling delays and
+        returns the median to stabilize against lower-amplitude human voice noise.
+        Accepts 2/3 valid reads as a fallback."""
         if not self.dog:
             return -1
         if not hasattr(self.dog, 'ears'):
             return -1
         try:
             readings = self._poll_ears_triple()
-            if len(readings) < 3:
+            if len(readings) < 2:
+                print(f"  [EARS] Direct poll FAILED: only {len(readings)}/3 valid reads", file=sys.stderr, flush=True)
                 return -1
-            avg_angle = sum(readings) // len(readings)
+            if len(readings) == 3:
+                readings_sorted = sorted(readings)
+                avg_angle = readings_sorted[1]
+            else:
+                avg_angle = sum(readings) // len(readings)
             self.latched_azimuth = avg_angle
+            print(f"  [EARS] Direct poll SUCCESS: readings={readings}, median={avg_angle}", file=sys.stderr, flush=True)
             return avg_angle
-        except Exception:
+        except Exception as e:
+            print(f"  [EARS] Direct poll unexpected error: {e}", file=sys.stderr, flush=True)
             return -1
 
     def pause_ears_monitor(self) -> bool:
