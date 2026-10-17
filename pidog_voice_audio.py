@@ -30,16 +30,20 @@ audio_worker_thread = None
 
 def _capture_direction():
     """Direct Poll Bypass - interrogates TR16F064B SPI registers via 3-poll rolling average.
-    Skips isdetected() interrupt gate since human voice won't pull the hardware pin high."""
-    try:
-        az = _rpc_call_with_timeout('read_sound_direction_direct')
+    Skips isdetected() interrupt gate since human voice won't pull the hardware pin high.
+    Includes one retry with 0.5s settle to recover from transient GPIO busy states."""
+    for attempt in range(2):
+        az = -1
+        try:
+            az = _rpc_call_with_timeout('read_sound_direction_direct')
+        except Exception as e:
+            print(f"  [AUDIO] Direction read warning (non-fatal): {e}", file=sys.stderr, flush=True)
         print(f"  [AUDIO] _capture_direction raw RPC return: {repr(az)} (type={type(az).__name__})", file=sys.stderr, flush=True)
         if isinstance(az, int) and az >= 0:
             return az
-        return -1
-    except Exception as e:
-        print(f"  [AUDIO] Direction read warning (non-fatal): {e}", file=sys.stderr, flush=True)
-        return -1
+        if attempt == 0:
+            time.sleep(0.5)
+    return -1
 
 
 def _init_session_file(audio_file, session_file):
