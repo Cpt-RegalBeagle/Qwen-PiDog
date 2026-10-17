@@ -4,6 +4,7 @@ PiDog XML-RPC Handler - Provides hardware control API
 import sys
 import os
 import time
+import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
@@ -48,6 +49,10 @@ class PidogRPCHandler:
 
         # Guard against spawning duplicate ears threads
         self._ears_thread = None
+
+        # SPI bus mutex - serializes ALL access to TR16F064B registers
+        # Prevents 'GPIO busy' when background thread and RPC handler contend
+        self._ears_spi_lock = threading.Lock()
 
         # Initialize hardware ears sensor ONCE during setup
         if hasattr(self.dog, 'ears'):
@@ -843,10 +848,11 @@ class PidogRPCHandler:
             if not hasattr(self.dog, 'ears'):
                 return -1
 
-            if not self.dog.ears.isdetected():
-                return -1
+            with self._ears_spi_lock:
+                if not self.dog.ears.isdetected():
+                    return -1
+                val = self.dog.ears.read()
 
-            val = self.dog.ears.read()
             if isinstance(val, (int, float)) and val >= 0:
                 self.latched_azimuth = int(val)
                 return int(val)
@@ -857,6 +863,7 @@ class PidogRPCHandler:
 
     def _poll_ears_triple(self):
         """Perform 3 SPI reads of the TR16F064B direction register with inter-poll settling.
+        Uses _ears_spi_lock to prevent contention with background ears thread.
         Returns list of valid angles (may be fewer than 3 if a poll fails)."""
         results = []
         # Let SPI bus settle after any prior hardware activity (arecord, etc.)
@@ -865,7 +872,8 @@ class PidogRPCHandler:
             if poll_idx > 0:
                 time.sleep(0.05)
             try:
-                val = self.dog.ears.read()
+                with self._ears_spi_lock:
+                    val = self.dog.ears.read()
                 print(f"  [EARS] Poll {poll_idx + 1}/3 raw: {repr(val)} (type={type(val).__name__})", file=sys.stderr, flush=True)
                 if isinstance(val, (int, float)) and val >= 0:
                     results.append(int(val))
@@ -910,7 +918,7 @@ class PidogRPCHandler:
         try:
             self.ears_tracking_allowed = False
 
-            print("  [SERVER LOGIC] Software tracking gate CLOSED.", flush=True)
+            print("  [SERVER LOGIC] Software tracking gate CLOSED.", file=sys.stderr, flush=True)
 
             return True
         except Exception:
@@ -925,7 +933,7 @@ class PidogRPCHandler:
             self.latched_azimuth = -1
             self.ears_tracking_allowed = True
 
-            print("  [SERVER LOGIC] Ears tracking gate OPENED. Azimuth buffer flushed.", flush=True)
+            print("  [SERVER LOGIC] Ears tracking gate OPENED. Azimuth buffer flushed.", file=sys.stderr, flush=True)
 
             return True
         except Exception:
@@ -933,7 +941,6 @@ class PidogRPCHandler:
 
     def start_ears_monitor(self):
         """Start background thread to continuously poll ears sensor. Safe to call multiple times."""
-        import threading
 
         if self._ears_thread is not None and self._ears_thread.is_alive():
             return
@@ -945,11 +952,12 @@ class PidogRPCHandler:
             while not self._ears_shutdown:
                 try:
                     if self.ears_tracking_allowed and self.dog and hasattr(self.dog, 'ears'):
-                        detected = self.dog.ears.isdetected()
-                        if detected:
-                            val = self.dog.ears.read()
-                            if isinstance(val, (int, float)):
-                                self.latched_azimuth = int(val)
+                        with self._ears_spi_lock:
+                            detected = self.dog.ears.isdetected()
+                            if detected:
+                                val = self.dog.ears.read()
+                                if isinstance(val, (int, float)):
+                                    self.latched_azimuth = int(val)
                 except Exception:
                     pass
 
