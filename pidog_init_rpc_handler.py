@@ -54,10 +54,9 @@ class PidogRPCHandler:
         # Prevents 'GPIO busy' when background thread and RPC handler contend
         self._ears_spi_lock = threading.Lock()
 
-        # Initialize hardware ears sensor ONCE during setup
-        if hasattr(self.dog, 'ears'):
-            from pidog.sound_direction import SoundDirection
-            self.dog.ears = SoundDirection()
+        # Ears sensor is already initialized by pidog_init.py hardware setup.
+        # Do NOT re-create it - that would orphan the original GPIO/SPI handles
+        # and cause 'GPIO busy' on every subsequent read.
 
     def init(self):
         """Initialize hardware - verifies initialization was successful"""
