@@ -18,6 +18,9 @@ from pidog_voice_rpc import _rpc_call_with_timeout, _setup_rpc_client, _critical
 import pidog_voice_audio
 from pidog_voice_audio import _start_audio_worker, _send_audio_to_stt, _process_conversation, _stream_and_speak, _speak_text, get_wav_volume
 
+# Import personality engine
+from pidog_personality_engine import start_personality_engine, stop_personality_engine
+
 # ==================== MODULE-LEVEL STATE ====================
 is_running = True
 shutdown_requested = False
@@ -69,6 +72,9 @@ def main():
 
     # Hardcode state confirmation once connectivity is physically proven
     is_running = True
+
+    # Start personality engine (scans AI responses for trigger words, fires RPC actions)
+    start_personality_engine(pidog_voice_rpc.rpc_client)
 
     # CRITICAL FIX: Start IDLE LISTENER FIRST (polls server, no local recording)
     _start_idle_listener_loop()
@@ -134,6 +140,9 @@ def main():
         # CRITICAL FIX: ALWAYS run cleanup on ANY exit path!
         print("  [INFO] Exiting main loop", file=sys.stderr, flush=True)
         is_running = False
+
+        # Stop personality engine gracefully
+        stop_personality_engine()
 
         # Stop idle listener thread gracefully
         if idle_listener_thread and idle_listener_thread.is_alive():
