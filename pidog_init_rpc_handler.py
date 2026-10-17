@@ -40,10 +40,14 @@ class PidogRPCHandler:
         self.ears_tracking_allowed = True
 
         # Background-polled azimuth angle (0-359) - PEAK-HOLD LATCHING
-        self.latched_azimuth = 0
+        # -1 is the universal "no sound" sentinel across all code paths
+        self.latched_azimuth = -1
 
         # Shutdown flag for ears background thread
         self._ears_shutdown = False
+
+        # Guard against spawning duplicate ears threads
+        self._ears_thread = None
 
         # Initialize hardware ears sensor ONCE during setup
         if hasattr(self.dog, 'ears'):
@@ -806,14 +810,6 @@ class PidogRPCHandler:
         except Exception:
             raise Exception("Nod error")
 
-    def get_sound_direction(self) -> int:
-        """Returns the latched azimuth from the background ears loop. Consistent with get_latched_azimuth."""
-        if not self.dog or not hasattr(self.dog, 'ears'):
-            return -1
-        if not self.ears_tracking_allowed:
-            return -1
-        return getattr(self, 'latched_azimuth', -1)
-
     def look_at_angle(self, angle: int):
         """Sweeps head servos smoothly toward the sound angle without blocking."""
         if not self.dog:
@@ -827,6 +823,9 @@ class PidogRPCHandler:
                     target_yaw = -int(angle * 0.5)
                 else:
                     target_yaw = int((360 - angle) * 0.5)
+
+            # Clamp to mechanical head range to prevent servo overdrive
+            target_yaw = max(-75, min(75, target_yaw))
 
             if hasattr(self.dog, 'head_move'):
                 self.dog.head_move([[target_yaw, 0, 0]], speed=80)
@@ -866,11 +865,14 @@ class PidogRPCHandler:
             return False
 
     def start_ears_monitor(self):
-        """Start background thread to continuously poll ears sensor."""
+        """Start background thread to continuously poll ears sensor. Safe to call multiple times."""
         import threading
 
-        if not hasattr(self, 'latched_azimuth'):
-            self.latched_azimuth = -1
+        # Guard: if a live ears thread already exists, do not spawn another
+        if self._ears_thread is not None and self._ears_thread.is_alive():
+            return
+
+        self.latched_azimuth = -1
         self._ears_shutdown = False
 
         def _ears_loop():
@@ -887,8 +889,8 @@ class PidogRPCHandler:
 
                 time.sleep(0.1)
 
-        thread = threading.Thread(target=_ears_loop, daemon=True)
-        thread.start()
+        self._ears_thread = threading.Thread(target=_ears_loop, daemon=True)
+        self._ears_thread.start()
 
     def stop_ears_monitor(self):
         """Signal the ears background thread to stop."""
@@ -897,30 +899,3 @@ class PidogRPCHandler:
     def get_latched_azimuth(self) -> int:
         """Exposes the internal latched sound vector memory to the network client."""
         return getattr(self, 'latched_azimuth', -1)
-
-    def look_at_last_sound_source(self) -> bool:
-        """Transforms our background-polled azimuth angle and clears the latch AFTER head movement."""
-        if not self.dog:
-            return False
-
-        try:
-            angle = getattr(self, 'latched_azimuth', -1)
-
-            if angle == -1 or angle == 0:
-                return False
-
-            if angle > 180:
-                target_yaw = int((360 - angle) * 0.5)
-            else:
-                target_yaw = -int(angle * 0.5)
-
-            target_yaw = max(-75, min(75, target_yaw))
-
-            if hasattr(self.dog, 'head_move'):
-                self.dog.head_move([[target_yaw, 0, 0]], speed=75, immediately=True)
-                self.dog.wait_all_done()
-
-            self.latched_azimuth = -1
-            return True
-        except Exception:
-            return False

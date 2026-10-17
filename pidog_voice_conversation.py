@@ -79,8 +79,9 @@ def _poll_server_azimuth() -> int:
     if result == last_processed_azimuth:
         return -1
 
+    prev_azimuth = last_processed_azimuth
     last_processed_azimuth = result
-    print("  [IDLE] Fresh azimuth detected: %d (last: %d)" % (result, last_processed_azimuth), file=sys.stderr, flush=True)
+    print("  [IDLE] Fresh azimuth detected: %d (prev: %d)" % (result, prev_azimuth), file=sys.stderr, flush=True)
     return result
 
 
