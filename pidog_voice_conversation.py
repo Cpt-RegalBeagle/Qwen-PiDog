@@ -118,6 +118,13 @@ def main():
                     if "Connection refused" in error_msg or "timed out" in error_msg.lower():
                         _critical_error_exit("RPC server unreachable")
 
+            # Restart idle listener if it has exited and the audio worker is no longer active
+            if idle_listener_thread is not None and not idle_listener_thread.is_alive():
+                audio_worker = pidog_voice_audio.audio_worker_thread
+                if audio_worker is None or not audio_worker.is_alive():
+                    print("  [INFO] Idle listener exited, audio worker done. Restarting idle listener.", file=sys.stderr, flush=True)
+                    _start_idle_listener_loop()
+
             time.sleep(1)
 
     except KeyboardInterrupt:

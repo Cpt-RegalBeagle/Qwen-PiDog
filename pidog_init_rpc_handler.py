@@ -8,6 +8,27 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 
+# Import preset_actions functions from the SDK for actions NOT in ActionDict
+from pidog.preset_actions import (
+    hand_shake as _pa_hand_shake,
+    high_five as _pa_high_five,
+    lick_hand as _pa_lick_hand,
+    push_up as _pa_push_up,
+    howling as _pa_howling,
+    body_twisting as _pa_body_twisting,
+    scratch as _pa_scratch,
+    feet_shake as _pa_feet_shake,
+    relax_neck as _pa_relax_neck,
+    nod as _pa_nod,
+    think as _pa_think,
+    recall as _pa_recall,
+    fluster as _pa_fluster,
+    surprise as _pa_surprise,
+    stretch as _pa_stretch,
+    bark_action as _pa_bark_action,
+    waiting as _pa_waiting,
+)
+
 
 class PidogRPCHandler:
     """XML-RPC request handler for PiDog hardware control"""
@@ -536,7 +557,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('stretch')
+            _pa_stretch(self.dog)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Stretching'}
         except Exception:
@@ -548,7 +569,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('push_up')
+            _pa_push_up(self.dog)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Doing push-ups'}
         except Exception:
@@ -572,7 +593,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('twist_body')
+            _pa_body_twisting(self.dog)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Twisting body'}
         except Exception:
@@ -584,7 +605,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('feet_shake')
+            _pa_feet_shake(self.dog)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Shaking feet'}
         except Exception:
@@ -596,7 +617,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('handshake')
+            _pa_hand_shake(self.dog)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Handshaking'}
         except Exception:
@@ -608,7 +629,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('high_five')
+            _pa_high_five(self.dog)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'High fiving'}
         except Exception:
@@ -620,7 +641,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('lick_hand')
+            _pa_lick_hand(self.dog)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Licking hand'}
         except Exception:
@@ -632,7 +653,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('scratch')
+            _pa_scratch(self.dog)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Scratching'}
         except Exception:
@@ -644,7 +665,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('fluster')
+            _pa_fluster(self.dog, pitch_comp=0)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Flustered'}
         except Exception:
@@ -656,7 +677,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('surprise')
+            _pa_surprise(self.dog, pitch_comp=0)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Surprised'}
         except Exception:
@@ -668,7 +689,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('think')
+            _pa_think(self.dog, pitch_comp=0)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Thinking'}
         except Exception:
@@ -680,7 +701,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('recall')
+            _pa_recall(self.dog, pitch_comp=0)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Recalling'}
         except Exception:
@@ -692,7 +713,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('relax_neck')
+            _pa_relax_neck(self.dog, pitch_comp=0)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Relaxing neck'}
         except Exception:
@@ -740,7 +761,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('bark_harder')
+            _pa_bark_action(self.dog, [0, 0, 0], 'single_bark_1')
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Barking harder'}
         except Exception:
@@ -752,7 +773,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('howling')
+            _pa_howling(self.dog)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Howling'}
         except Exception:
@@ -764,7 +785,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('waiting')
+            _pa_waiting(self.dog, pitch_comp=0)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Waiting'}
         except Exception:
@@ -776,7 +797,7 @@ class PidogRPCHandler:
             raise Exception("Hardware not initialized")
         
         try:
-            self.dog.do_action('nod')
+            _pa_nod(self.dog, pitch_comp=0)
             self.dog.wait_all_done()
             return {'status': 'success', 'message': 'Nodding'}
         except Exception:
