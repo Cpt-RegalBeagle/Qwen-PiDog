@@ -10,11 +10,12 @@ Integration (ONE line in pidog_voice_audio.py, inside _stream_and_speak):
 
 That is the only modification to the voice module.
 
-Matching is case-insensitive: "Yes" (sentence start) and "yes"
-(mid-sentence) both trigger the "yes" entry in PERSONALITY_ACTIONS.
+Matching uses word-boundary regex so "hi" triggers on "Hi there!"
+but NOT on "things" or "this".
 """
 
 import queue
+import re
 import threading
 import time
 import sys
@@ -53,7 +54,6 @@ def _fire_rpc(rpc_client, method_name, args):
         except Exception as e:
             print(f"  [PERSONALITY] RPC fire error on '{method_name}': {e}", file=sys.stderr, flush=True)
             return
-        # Return to sitting position after personality action completes
         if RETURN_TO_SIT_AFTER_ACTION:
             try:
                 rpc_client.action('sit')
@@ -76,12 +76,10 @@ def _check_cooldown(method_name):
 
 def _scan_text(text, rpc_client):
     """
-    Scan text for triggers, fire up to MAX_ACTIONS_PER_MESSAGE actions.
+    Scan text for triggers using word-boundary regex matching.
 
-    Matching is case-insensitive substring scan:
-      - "Yes, that's right!" matches trigger "yes" (capital Y, sentence start)
-      - "I think yes is correct" matches trigger "yes" (lowercase, mid-sentence)
-    Both forms are detected because we compare lowered text against lowered phrases.
+    "hi" matches "Hi there!" and "I said hi" but NOT "things" or "this".
+    Multi-word phrases like "let's go" also use word boundaries.
     """
     if not ENABLED:
         return
@@ -96,7 +94,8 @@ def _scan_text(text, rpc_client):
     for phrase, (method_name, args) in PERSONALITY_ACTIONS.items():
         if fired >= MAX_ACTIONS_PER_MESSAGE:
             break
-        if phrase.lower() not in lowered:
+        pattern = r'\b' + re.escape(phrase.lower()) + r'\b'
+        if not re.search(pattern, lowered):
             continue
         if not _check_cooldown(method_name):
             continue
