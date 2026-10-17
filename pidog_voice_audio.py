@@ -29,9 +29,10 @@ audio_worker_thread = None
 
 
 def _capture_direction():
-    """One-shot read of the SoundDirection SPI sensor via RPC. Returns angle or -1."""
+    """Direct Poll Bypass - interrogates TR16F064B SPI registers via 3-poll rolling average.
+    Skips isdetected() interrupt gate since human voice won't pull the hardware pin high."""
     try:
-        az = _rpc_call_with_timeout('read_sound_direction')
+        az = _rpc_call_with_timeout('read_sound_direction_direct')
         if isinstance(az, int) and az >= 0:
             return az
         return -1
@@ -134,9 +135,11 @@ def _start_audio_worker():
                     if current_volume <= SPEECH_THRESHOLD:
                         continue
 
-                    # Phase 2: VAD hit - one-shot read of SoundDirection SPI sensor
+                    # Phase 2: VAD hit - Direct Poll Bypass of TR16F064B SPI registers
+                    # Bypasses isdetected() since human voice won't flip the interrupt pin.
+                    # 3-poll rolling average stabilizes Phase-Difference noise.
                     wakeup_azimuth = _capture_direction()
-                    print(f"  [AUDIO] Sound direction captured: {wakeup_azimuth}", file=sys.stderr, flush=True)
+                    print(f"  [AUDIO] Sound direction captured (direct poll): {wakeup_azimuth}", file=sys.stderr, flush=True)
 
                     # Phase 3: Brief settle - let SPI/GPIO bus release before next mic capture
                     time.sleep(0.5)

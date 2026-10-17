@@ -835,7 +835,7 @@ class PidogRPCHandler:
             return {'status': 'error', 'message': 'Sound localization error'}
 
     def read_sound_direction(self) -> int:
-        """One-shot active read of the SoundDirection SPI sensor. Returns angle 0-355 or -1 if no detection."""
+        """Legacy one-shot read gated by isdetected() interrupt pin. Returns angle 0-355 or -1."""
         if not self.dog:
             return -1
 
@@ -852,6 +852,37 @@ class PidogRPCHandler:
                 return int(val)
 
             return -1
+        except Exception:
+            return -1
+
+    def _poll_ears_triple(self):
+        """Perform 3 rapid SPI reads of the TR16F064B direction register. Returns list of valid angles."""
+        results = []
+        for _ in range(3):
+            try:
+                val = self.dog.ears.read()
+            except Exception:
+                continue
+            if isinstance(val, (int, float)) and val >= 0:
+                results.append(int(val))
+        return results
+
+    def read_sound_direction_direct(self) -> int:
+        """Direct Poll Bypass - skips isdetected() interrupt gate entirely.
+        The TR16F064B continuously updates its Phase-Difference orientation registers over SPI
+        regardless of interrupt pin state. Performs 3 rapid polls and returns the rolling
+        window average to stabilize against lower-amplitude human voice noise."""
+        if not self.dog:
+            return -1
+        if not hasattr(self.dog, 'ears'):
+            return -1
+        try:
+            readings = self._poll_ears_triple()
+            if len(readings) < 3:
+                return -1
+            avg_angle = sum(readings) // len(readings)
+            self.latched_azimuth = avg_angle
+            return avg_angle
         except Exception:
             return -1
 
