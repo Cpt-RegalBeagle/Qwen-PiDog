@@ -868,7 +868,7 @@ class PidogRPCHandler:
                     val = self.dog.ears.read()
             except Exception as e:
                 print(f"  [EARS] Poll {poll_idx + 1}/3 attempt {attempt + 1} exception: {e}", file=sys.stderr, flush=True)
-                time.sleep(0.3)
+                time.sleep(0.5)
                 continue
             print(f"  [EARS] Poll {poll_idx + 1}/3 raw: {repr(val)} (type={type(val).__name__})", file=sys.stderr, flush=True)
             if isinstance(val, (int, float)) and val >= 0:
@@ -906,7 +906,8 @@ class PidogRPCHandler:
             self._ears_shutdown = True
             if self._ears_thread is not None and self._ears_thread.is_alive():
                 self._ears_thread.join(timeout=1.0)
-            time.sleep(0.2)
+            self._ears_thread = None
+            time.sleep(0.5)
             readings = self._poll_ears_triple()
             if len(readings) < 2:
                 print(f"  [EARS] Direct poll FAILED: only {len(readings)}/3 valid reads", file=sys.stderr, flush=True)
@@ -926,14 +927,18 @@ class PidogRPCHandler:
             self.start_ears_monitor()
 
     def pause_ears_monitor(self) -> bool:
-        """Disables the tracking calculation without destroying the hardware context handles."""
+        """Disables tracking and fully stops the background thread to release SPI/GPIO bus."""
         if not self.dog:
             return False
 
         try:
             self.ears_tracking_allowed = False
+            self._ears_shutdown = True
+            if self._ears_thread is not None and self._ears_thread.is_alive():
+                self._ears_thread.join(timeout=1.0)
+            self._ears_thread = None
 
-            print("  [SERVER LOGIC] Software tracking gate CLOSED.", file=sys.stderr, flush=True)
+            print("  [SERVER LOGIC] Software tracking gate CLOSED. Thread stopped.", file=sys.stderr, flush=True)
 
             return True
         except Exception:

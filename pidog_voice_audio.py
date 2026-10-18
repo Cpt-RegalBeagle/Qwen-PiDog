@@ -32,6 +32,8 @@ def _capture_direction():
     """Direct Poll Bypass - interrogates TR16F064B SPI registers via 3-poll rolling average.
     Skips isdetected() interrupt gate since human voice won't pull the hardware pin high.
     Includes one retry with 0.5s settle to recover from transient GPIO busy states."""
+    # Initial settle: let SPI/GPIO bus release after pause_ears_monitor stopped the bg thread
+    time.sleep(0.5)
     for attempt in range(2):
         az = -1
         try:

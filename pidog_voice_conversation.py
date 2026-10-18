@@ -105,11 +105,17 @@ def _idle_listener_loop():
         except Exception as e:
             print("  [IDLE] Head turn failed (non-fatal): %s" % e, file=sys.stderr, flush=True)
 
+        # Let head motor and SPI bus settle before touching ears GPIO
+        time.sleep(1.0)
+
         # Pause ears to prevent re-trigger during conversation
         try:
             _rpc_call_with_timeout('pause_ears_monitor')
         except Exception as e:
             print("  [IDLE] Ears pause failed (non-fatal): %s" % e, file=sys.stderr, flush=True)
+
+        # Let GPIO/SPI bus fully release after background thread stop
+        time.sleep(0.5)
 
         # Start local VAD recording loop
         _start_audio_worker()
