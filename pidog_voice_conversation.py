@@ -1,14 +1,6 @@
 import os
-import time
-import threading
 import sys
-import xmlrpc.client
-
-# Import config to get module-level settings
-import config
-
-# Import pidog_init_rpc_handler.py
-from pidog_init_rpc_handler import PidogRPCHandler
+import time
 
 # Import pidog_voice_rpc.py
 import pidog_voice_rpc
@@ -16,7 +8,7 @@ from pidog_voice_rpc import _rpc_call_with_timeout, _setup_rpc_client, _critical
 
 # Import pidog_voice_audio.py
 import pidog_voice_audio
-from pidog_voice_audio import _start_audio_worker, _send_audio_to_stt, _process_conversation, _stream_and_speak, _speak_text, get_wav_volume
+from pidog_voice_audio import _start_audio_worker
 
 # Import personality engine
 from pidog_personality_engine import start_personality_engine, stop_personality_engine
@@ -24,9 +16,6 @@ from pidog_personality_engine import start_personality_engine, stop_personality_
 # ==================== MODULE-LEVEL STATE ====================
 is_running = True
 shutdown_requested = False
-audio_worker_thread = None
-idle_listener_thread = None
-last_processed_azimuth = -1
 
 
 def _connect_rpc():
@@ -62,82 +51,6 @@ def _init_rgb():
                 time.sleep(retry_delay)
 
 
-def _poll_server_azimuth() -> int:
-    """Poll server for a fresh sound azimuth. Returns azimuth int or -1 if none."""
-    global last_processed_azimuth
-
-    try:
-        result = _rpc_call_with_timeout('get_latched_azimuth')
-    except Exception as e:
-        print("  [IDLE] Server poll error (non-fatal): %s" % e, file=sys.stderr, flush=True)
-        return -1
-
-    if not isinstance(result, int):
-        return -1
-    if result == -1 or result == 0:
-        return -1
-    if result == last_processed_azimuth:
-        return -1
-
-    prev_azimuth = last_processed_azimuth
-    last_processed_azimuth = result
-    print("  [IDLE] Fresh azimuth detected: %d (prev: %d)" % (result, prev_azimuth), file=sys.stderr, flush=True)
-    return result
-
-
-def _idle_listener_loop():
-    """Poll server-side ears tracking to detect sound, turn head, start capture."""
-    global is_running, shutdown_requested
-
-    print("  [IDLE] Idle listener loop initialized. Polling server for sound detection...", file=sys.stderr, flush=True)
-
-    while is_running and not shutdown_requested:
-        azimuth = _poll_server_azimuth()
-        if azimuth == -1:
-            time.sleep(0.5)
-            continue
-
-        print("  [IDLE] Server detected sound at azimuth %d! Triggering capture phase..." % azimuth, file=sys.stderr, flush=True)
-
-        # Turn head to face the sound source
-        try:
-            _rpc_call_with_timeout('look_at_angle', azimuth)
-        except Exception as e:
-            print("  [IDLE] Head turn failed (non-fatal): %s" % e, file=sys.stderr, flush=True)
-
-        # Let head motor and SPI bus settle before touching ears GPIO
-        time.sleep(1.0)
-
-        # Pause ears to prevent re-trigger during conversation
-        try:
-            _rpc_call_with_timeout('pause_ears_monitor')
-        except Exception as e:
-            print("  [IDLE] Ears pause failed (non-fatal): %s" % e, file=sys.stderr, flush=True)
-
-        # Let GPIO/SPI bus fully release after background thread stop
-        time.sleep(0.5)
-
-        # Start local VAD recording loop
-        _start_audio_worker()
-
-        # Exit idle listener - audio worker will handle the rest
-        break
-
-
-def _start_idle_listener_loop():
-    """Start background thread to poll server for sound detection."""
-    global idle_listener_thread
-
-    try:
-        idle_listener_thread = threading.Thread(target=_idle_listener_loop, daemon=True)
-        idle_listener_thread.start()
-        print("  [IDLE] Idle listener thread started", file=sys.stderr, flush=True)
-        print("  [TIME] %s - Idle listener PID: %d" % (time.strftime('%H:%M:%S'), idle_listener_thread.ident), file=sys.stderr, flush=True)
-    except Exception as e:
-        print("  [IDLE] Idle listener failed: %s" % e, file=sys.stderr, flush=True)
-        _critical_error_exit("Idle listener initialization failed")
-
-
 def _maybe_health_check(last_check_time):
     """Perform RPC health check if due. Returns updated last_check_time."""
     current = time.time()
@@ -158,37 +71,22 @@ def _maybe_health_check(last_check_time):
         return current
 
 
-def _maybe_restart_idle_listener():
-    """Check if idle listener needs restarting. Restarts it if audio worker is done."""
-    global idle_listener_thread
-
-    if idle_listener_thread is None:
-        return
-    if idle_listener_thread.is_alive():
-        return
+def _maybe_restart_audio_worker():
+    """Check if audio worker needs restarting. Restarts it if the thread is dead."""
     audio_worker = pidog_voice_audio.audio_worker_thread
     if audio_worker is not None and audio_worker.is_alive():
         return
 
-    print("  [INFO] Idle listener exited, audio worker done. Restarting idle listener.", file=sys.stderr, flush=True)
-    try:
-        _rpc_call_with_timeout('resume_ears_monitor')
-    except Exception:
-        pass
-    _start_idle_listener_loop()
+    print("  [INFO] Audio worker thread not running. Restarting.", file=sys.stderr, flush=True)
+    _start_audio_worker()
 
 
 def _cleanup_threads():
     """Stop all background threads gracefully."""
-    global is_running, idle_listener_thread
+    global is_running
 
     is_running = False
     stop_personality_engine()
-    if idle_listener_thread and idle_listener_thread.is_alive():
-        try:
-            idle_listener_thread.join(timeout=2)
-        except Exception:
-            pass
     if pidog_voice_audio.audio_worker_thread and pidog_voice_audio.audio_worker_thread.is_alive():
         try:
             pidog_voice_audio.audio_worker_thread.join(timeout=2)
@@ -198,7 +96,7 @@ def _cleanup_threads():
 
 def main():
     """Main entry point for the voice assistant - runs continuously until interrupted."""
-    global is_running, shutdown_requested, audio_worker_thread, idle_listener_thread
+    global is_running, shutdown_requested
 
     print("  [INFO] Starting main() with PID: %d" % os.getpid(), file=sys.stderr, flush=True)
     print("  [INFO] Entering main()", file=sys.stderr, flush=True)
@@ -213,8 +111,8 @@ def main():
     # Start personality engine (scans AI responses for trigger words, fires RPC actions)
     start_personality_engine(pidog_voice_rpc.rpc_client)
 
-    # Start idle listener (polls server, no local recording)
-    _start_idle_listener_loop()
+    # Start VAD audio worker (listens for human speech -> STT -> LLM -> TTS)
+    _start_audio_worker()
 
     # RGB: BREATH GREEN - initial idle state
     _init_rgb()
@@ -224,12 +122,11 @@ def main():
     print("  [INFO] Use Ctrl+C to exit\n", file=sys.stderr, flush=True)
 
     last_health_check = time.time()
-    start_time = time.time()
 
     try:
         while is_running and not shutdown_requested:
             last_health_check = _maybe_health_check(last_health_check)
-            _maybe_restart_idle_listener()
+            _maybe_restart_audio_worker()
             time.sleep(1)
     except KeyboardInterrupt:
         print("  [INFO] Interrupted by user - stopping...", file=sys.stderr, flush=True)

@@ -3,7 +3,7 @@ pidog_personality_engine.py
 Background thread that scans AI response text for personality triggers
 and fires matching RPC actions in fire-and-forget daemon threads.
 
-Integration (ONE line in pidog_voice_audio.py, inside _stream_and_speak):
+Integration (ONE line in pidog_voice_audio.py, inside _send_audio_to_stt):
 
     from pidog_personality_engine import personality_queue
     personality_queue.put(full_response)
@@ -28,6 +28,8 @@ from pidog_actions_dictionary import (
     RETURN_TO_SIT_AFTER_ACTION,
 )
 
+from pidog_voice_rpc import _rpc_call_with_timeout
+
 # Shared queue: voice module puts text here, engine thread reads it.
 personality_queue = queue.Queue(maxsize=64)
 
@@ -40,23 +42,19 @@ _shutdown = threading.Event()
 def _fire_rpc(rpc_client, method_name, args):
     """Fire a single RPC call in a daemon thread. Never raises."""
     def _worker():
-        try:
-            method = getattr(rpc_client, method_name, None)
-        except Exception:
+        # Truthiness guard only - keep the early-out for a missing proxy.
+        if not rpc_client:
             return
-        if method is None:
-            return
+        # Route through the locked helper so we serialize with the audio
+        # worker on the shared ServerProxy. Never raises.
         try:
-            if args:
-                method(*args)
-            else:
-                method()
+            _rpc_call_with_timeout(method_name, *args)
         except Exception as e:
             print(f"  [PERSONALITY] RPC fire error on '{method_name}': {e}", file=sys.stderr, flush=True)
             return
         if RETURN_TO_SIT_AFTER_ACTION:
             try:
-                rpc_client.action('sit')
+                _rpc_call_with_timeout('action', 'sit')
             except Exception:
                 pass
     t = threading.Thread(target=_worker, daemon=True)

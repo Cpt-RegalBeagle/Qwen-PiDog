@@ -158,92 +158,6 @@ def set_network_mode(network_mode: str):
         config.NETWORK_MODE = 'tunnel'
 
 
-def run_test_mode():
-    """Run in test mode for CI/CD pipeline validation"""
-    print("\n🧪 TEST MODE - Running active verification...")
-    
-    # CRITICAL FIX: Don't disable FACE_TRACKING_ENABLED - STT is independent!
-    # Only disable camera-related features if needed
-    
-    import pidog_voice_conversation as vp
-    vp.set_test_mode(True)
-    
-    TEST_TIMEOUT_SECONDS = config.TEST_MODE_TIMEOUT_SECONDS
-    
-    def test_with_timeout():
-        try:
-            print("  1. Testing voice module...")
-            if not vp.verify_engine(timeout=TEST_TIMEOUT_SECONDS):
-                return False
-                
-            print("  ✅ Voice module verified")
-            
-            print("\n✅ All modules verified successfully")
-            return True
-            
-        except Exception as e:
-            print(f"\n❌ Verification error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    test_thread = threading.Thread(target=test_with_timeout)
-    test_thread.daemon = True
-    state.register_shutdown(lambda: None)  # Register for cleanup tracking
-    test_thread.start()
-    
-    try:
-        test_thread.join(timeout=TEST_TIMEOUT_SECONDS + 5)
-        
-        if test_thread.is_alive():
-            print(f"\n⚠ TEST TIMEOUT - Test exceeded {TEST_TIMEOUT_SECONDS} seconds")
-            print("🛑 Force stopping test to prevent indefinite hanging...")
-            state.shutdown()
-            return False
-        
-        time.sleep(0.5)
-        
-    except Exception as e:
-        print(f"⚠ Timeout error: {e}")
-        state.shutdown()
-        return False
-    
-    print("\n✅ Test mode completed successfully")
-    return True
-
-
-def run_parallel_modules():
-    """Run core hardware tests and cleanup - no voice profile for now"""
-    # Import and test voice profile module
-    try:
-        import pidog_voice_conversation as vp
-        
-        print("\n🧪 Testing Voice Profile Module...")
-        
-        # Test RPC connection
-        if not vp._setup_rpc_client():
-            print("  ❌ Voice profile failed to connect to RPC server")
-            return False
-        
-        print("  ✅ Voice profile connected to RPC server")
-        
-        # Verify engine
-        success = vp.verify_engine(timeout=30)
-        
-        if success:
-            print("  ✅ Voice profile verification complete")
-            return True
-        else:
-            print("  ❌ Voice profile verification failed")
-            return False
-            
-    except Exception as e:
-        print(f"  ❌ Voice profile test error: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
-        return False
-
-
 def background_module_watchdog(voice_proc, tracking_proc=None):
     """Watches active background AI modules. If any module drops dead, 
 
@@ -397,7 +311,7 @@ def cleanup_and_exit(return_code: int):
 
 def main():
     """Main entrypoint for PIDOG system"""
-    
+
     parser = argparse.ArgumentParser(
         description='PIDOG Voice Assistant System - Subprocess Orchestrator',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -406,34 +320,32 @@ Examples:
   python main.py                    # Run voice assistant (default: local Wi-Fi)
   python main.py --local            # Run with direct local Wi-Fi connection
   python main.py --tunnel           # Run with Cloudflare tunnel proxy
-  python main.py --test             # Run in test mode for CI/CD (active verification, 60s timeout)
         """
     )
-    
+
     parser.add_argument('--local', action='store_true', help='Run with direct local Wi-Fi connection')
     parser.add_argument('--tunnel', action='store_true', help='Run with Cloudflare tunnel proxy routing')
-    parser.add_argument('--test', action='store_true', help='Run in test mode for CI/CD (active verification, 60s timeout)')
-    
+
     args = parser.parse_args()
-    
+
     if args.local and args.tunnel:
         print("Error: --local and --tunnel are mutually exclusive configurations.")
         sys.exit(1)
-    
+
     setup_signal_handlers()
-    
+
     # CRITICAL FIX: Start hardware button watchdog thread for headless shutdown
     button_thread = threading.Thread(target=hardware_button_watchdog, daemon=True)
     button_thread.start()
-    
+
     network_mode = 'local' if args.local else ('tunnel' if args.tunnel else None)
     if network_mode:
         set_network_mode(network_mode)
-    
+
     try:
         # Use non-blocking subprocess with no PIPE to avoid buffer deadlock
         pidog_init_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pidog_init.py')
-        
+
         state.pidog_init_process = subprocess.Popen(
             [sys.executable, pidog_init_script],
             stdout=None,  # Inherit parent's stdout (terminal) - SEE OUTPUT!
@@ -441,35 +353,35 @@ Examples:
             cwd=os.path.dirname(os.path.abspath(__file__)),
             preexec_fn=os.setsid       # Create new process group for clean kill
         )
-        
+
         print(f"  [PID] pidog_init.py started (PID: {state.pidog_init_process.pid})")
-        
+
         # CRITICAL FIX: Wait for pidog_init to complete with proper timeout
         print("  ⏳ Waiting for pidog_init.py to complete hardware tests...", file=sys.stderr)
-        
+
         try:
             state.pidog_init_process.wait(timeout=180)  # 3 minute max wait
             returncode = state.pidog_init_process.poll()
-            
+
             if returncode == 0:
                 print(f"  ✅ pidog_init.py completed successfully (exit code: {returncode})", file=sys.stderr)
             else:
                 print(f"  ❌ pidog_init.py failed with exit code: {returncode}", file=sys.stderr)
                 cleanup_and_exit(1)
-                
+
         except subprocess.TimeoutExpired:
             print(f"  ❌ pidog_init.py timed out after 180s", file=sys.stderr)
             state.pidog_init_process.kill()
             cleanup_and_exit(1)
-        
+
         # CRITICAL FIX: Verify port 8001 is actually open before launching voice profile
         print("  🔍 Verifying RPC server port 8001 is accessible...", file=sys.stderr)
-        
+
         import socket
-        
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
-        
+
         try:
             result = sock.connect_ex(('localhost', 8001))
             if result == 0:
@@ -482,43 +394,52 @@ Examples:
             cleanup_and_exit(1)
         finally:
             sock.close()
-        
-        # CRITICAL FIX: Pre-heat Ollama model before voice profile loads
-        print("  🔥 Pre-heating Ollama model 'buddy:latest' for instant response...", file=sys.stderr)
-        _pre_heat_ollama_model()
-        
+
+                # CRITICAL FIX: Pre-heat fast conversation model via llama-server router API
+        print(f"  🔥 Pre-heating lightweight model '{config.TARGET_MODEL}' for instant response...", file=sys.stderr)
+
+        # Pulls network configuration and the active model target from global config
+        model_warmed = load_llama_model(
+            server_ip=config.SERVER_IP,
+            port=config.PORT_OLLAMA,
+            model_name=config.TARGET_MODEL
+        )
+
+        if not model_warmed:
+            print("  ⚠️ Warning: Model pre-heating failed or timed out. Attempting to continue...", file=sys.stderr)
+
         # Perform startup movements before voice module loads
         perform_startup_movements()
-        
+
         # CRITICAL FIX: Launch voice profile IMMEDIATELY after port verification
         print("\n🎤 Launching Voice Profile Module immediately...", file=sys.stderr)
-        
+
         success = run_voice_profile()
-        
+
         if success:
             print("\n✅ PIDOG Core Pipeline initialization complete")
             print("  🎤 Voice profile launched successfully")
-            
+
             # Give voice profile a moment to initialize RPC connection
             time.sleep(2)
-            
+
             print("\n🛑 PIDOG Core Pipeline complete - voice profile running continuously...")
             print("  🎤 Voice assistant ready. Press Ctrl+C to exit.\n")
 
             # Main loop to keep script alive until Ctrl+C
             while state.running:
                 time.sleep(1)
-                
+
         else:
             print("\n❌ Failed to launch voice profile")
             cleanup_and_exit(1)
-            
+
     # Hardware RST button handles panic shutdown via GPIO interrupt
     # Ctrl+C still works but is secondary to hardware panic
     except KeyboardInterrupt:
         print("\n⚠ Interrupted by user (Ctrl+C)")
         return cleanup_and_exit(130)
-        
+
     except Exception as e:
         print(f"\n❌ System error: {e}")
         import traceback
@@ -526,34 +447,117 @@ Examples:
         return cleanup_and_exit(1)
 
 
-def _pre_heat_ollama_model():
-    """Pre-warm the buddy:latest model in memory with persistent keep_alive"""
-    
+
+import requests
+
+# Ready states reported by the llama.cpp router for a model that can serve requests
+ROUTER_READY_STATES = ("loaded", "sleeping")
+# States where a load is already underway and only needs to be waited on
+ROUTER_IN_PROGRESS_STATES = ("loading", "downloading", "downloaded")
+
+
+def _router_model_state(entry):
+    """Normalize a /v1/models entry into (state, failed, exit_code)."""
+    if not isinstance(entry, dict):
+        return None, False, None
+    status = entry.get("status")
+    if isinstance(status, dict):
+        return status.get("value"), bool(status.get("failed")), status.get("exit_code")
+    # Older router builds may report a plain string status
+    return status, False, None
+
+
+def load_llama_model(server_ip, port, model_name, timeout=120.0, poll_interval=2.0):
+    """
+    Triggers llama-server Router Mode to hot-swap or preload a specific model,
+    then polls /v1/models until the model's status reports 'loaded'.
+
+    The router's POST /models/load returns HTTP 200 as soon as the load is
+    *accepted*, not when it has *completed* - so the 200 alone is not a success
+    signal. Success is only confirmed by polling. Failure is detected via
+    status.failed / exit_code != 0 (child process died, e.g. bad GGUF path),
+    an 'incomplete' model file, an unreachable router, or a timeout.
+    Returns a plain bool and never raises - boot continues on failure.
+    """
+    base_url = f"http://{server_ip}:{port}"
+
+    def fetch_entry():
+        """Return (entry, error): the model's /v1/models entry (or None) and an error string."""
+        try:
+            response = requests.get(f"{base_url}/v1/models", timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.exceptions.RequestException, ValueError) as e:
+            return None, str(e)
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        if isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, dict) and entry.get("id") == model_name:
+                    return entry, None
+        return None, None
+
     try:
-        import requests
-        
-        ollama_url = config.OLLAMA_STREAM_URL
-        
-        print(f"  [PRE-HEAT] Warming up Ollama model at {ollama_url}", file=sys.stderr)
-        
-        # Use generate endpoint to load model into memory with -1 (infinite) keep_alive
-        payload = {
-            "model": "buddy:latest",
-            "prompt": "System ready. Model loaded and waiting for voice input.",
-            "stream": False,
-            "keep_alive": -1  # CRITICAL: Keep model in memory indefinitely
-        }
-        
-        response = requests.post(ollama_url, json=payload)
-        
-        if response.status_code == 200:
-            print(f"  ✅ Model pre-heated successfully with keep_alive=-1", file=sys.stderr)
+        # 1) Pre-flight: router reachable and model registered in the preset
+        entry, err = fetch_entry()
+        if err:
+            print(f"Model pre-heat aborted - cannot reach router model list: {err}")
+            return False
+        if entry is None:
+            print(f"Model pre-heat aborted - '{model_name}' is not registered in the router preset")
+            return False
+
+        state, failed, exit_code = _router_model_state(entry)
+
+        # 2) Fast path: already serving
+        if state in ROUTER_READY_STATES:
+            print(f"Model already loaded: {model_name}")
+            return True
+
+        # 3) Trigger the load (skip if one is already in progress)
+        if state not in ROUTER_IN_PROGRESS_STATES:
+            response = requests.post(
+                f"{base_url}/models/load",
+                json={"model": model_name},
+                headers={"Content-Type": "application/json"},
+                timeout=60,
+            )
+            if response.status_code != 200:
+                print(f"Failed to load model. Server returned {response.status_code}: {response.text}")
+                return False
+            print(f"Model load accepted for {model_name}; polling for 'loaded'...")
         else:
-            print(f"  ⚠ Pre-heat warning (non-fatal): {response.status_code}", file=sys.stderr)
-            
+            print(f"Model load already in progress ({state}); waiting for 'loaded'...")
+
+        # 4) Poll until the model is loaded, fails, or times out
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(poll_interval)
+
+            entry, err = fetch_entry()
+            if err:
+                print(f"Transient router error while polling '{model_name}': {err}")
+                continue
+            if entry is None:
+                continue
+
+            state, failed, exit_code = _router_model_state(entry)
+            if state in ROUTER_READY_STATES:
+                print(f"Successfully loaded model: {model_name}")
+                return True
+            if failed or (exit_code is not None and exit_code != 0):
+                print(f"Model load FAILED: {model_name} (state={state}, exit_code={exit_code})")
+                return False
+            if state == "incomplete":
+                print(f"Model load FAILED: {model_name} (router reports model file is incomplete)")
+                return False
+            # otherwise loading/unloaded/etc. - keep polling
+
+        print(f"Timed out after {timeout:.0f}s waiting for model '{model_name}' to reach 'loaded'")
+        return False
+
     except Exception as e:
-        # Don't crash on pre-heat failure - voice module will still work
-        print(f"  ⚠ Pre-heat error (non-fatal): {e}", file=sys.stderr, flush=True)
+        print(f"Error pre-heating model {model_name}: {e}")
+        return False
 
 
 if __name__ == '__main__':

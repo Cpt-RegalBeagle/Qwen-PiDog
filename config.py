@@ -31,15 +31,8 @@ if NETWORK_MODE not in ["local", "tunnel"]:
     log_config_error(f"Invalid NETWORK_MODE '{NETWORK_MODE}'. Defaulting to 'local'", "ERROR")
     NETWORK_MODE = "local"
 
-# ==================== TEST MODE SETTINGS ====================
-TEST_MODE_ENABLED: bool = os.getenv("TEST_MODE_ENABLED", "false").lower() == "true"
-
-# Disable face tracking during tests to prevent camera conflicts
-if TEST_MODE_ENABLED:
-    log_config_error("TEST_MODE_ENABLED is set to true. Face tracking will be disabled.", "INFO")
-    FACE_TRACKING_ENABLED = False
-else:
-    FACE_TRACKING_ENABLED: bool = os.getenv("FACE_TRACKING_ENABLED", "true").lower() == "true"
+# ==================== FACE TRACKING SETTINGS (PRE-DECLARATION) ====================
+FACE_TRACKING_ENABLED: bool = os.getenv("FACE_TRACKING_ENABLED", "true").lower() == "true"
 
 # ==================== AUDIO SETTINGS ====================
 OUTPUT_DEVICE_ID: str = os.getenv("PIDOG_OUTPUT_DEVICE", "pipewire")
@@ -105,7 +98,7 @@ for port_name, port_value in [("OLLAMA", PORT_OLLAMA), ("KOKORO", PORT_KOKORO), 
         log_config_error(f"{port_name} port must be a positive integer, got {port_value}", "ERROR")
 
 # ==================== API URLS ====================
-OLLAMA_STREAM_URL: str = f"http://{SERVER_IP}:{PORT_OLLAMA}/api/chat"
+OLLAMA_STREAM_URL: str = f"http://{SERVER_IP}:{PORT_OLLAMA}/v1/chat/completions"
 KOKORO_API_URL: str = f"http://{SERVER_IP}:{PORT_KOKORO}/v1/audio/speech"
 STT_HOST_URL: str = f"http://{SERVER_IP}:{PORT_WEBUI}/api/v1/audio/transcriptions"
 WHISPER_HEALTH_URL: str = f"http://{SERVER_IP}:{PORT_WEBUI}/health"
@@ -135,8 +128,8 @@ if not TTS_VOICE or TTS_VOICE.strip() == "":
 TARGET_VOICE: str = TTS_VOICE
 
 # ==================== LLM MODEL SETTINGS ====================
-TARGET_MODEL: str = os.getenv("OLLAMA_MODEL", "buddy:latest")
-NUM_CONTEXT: int = 16384
+TARGET_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3.5-4b")
+NUM_CONTEXT: int = 32768
 
 if not TARGET_MODEL or TARGET_MODEL.strip() == "":
     log_config_error("TARGET_MODEL is empty. Defaulting to 'qwen3.5:latest'", "ERROR")
@@ -161,7 +154,6 @@ SYSTEM_PROMPT: str = (
     "- If he asks a question, give the punchy answer first, then maybe one tiny fun fact."
     "- If he is stuck or frustrated, be encouraging. 'You got this, genius.' Keep it light."
     "- You can ask ONE short follow-up question to keep him engaged, but only if it fits in your word limit."
-    "- Reference space, rockets, planets, code, or cool tech naturally when it fits."
     "- Never talk down to him. He is smart. Treat him like a young scientist."
 
     "ADHD-FRIENDLY BEHAVIOR:"
@@ -169,17 +161,6 @@ SYSTEM_PROMPT: str = (
     "- Start with the answer or the fun part. No 'Great question!' preambles."
     "- If he seems to lose focus or asks something random, just roll with it happily."
     "- Never lecture. Never give more than one fact unless he asks for more."
-
-    "EXAMPLE GOOD RESPONSES:"
-    "- 'Whoa, black holes. So basically space squishes stuff so hard light cannot escape. Wild right?'"
-    "- 'Okay genius, a rocket needs fuel and oxygen. Like a giant firework that goes UP instead of out!'"
-    "- 'You got this Carter. Just break it into tiny steps. What is the first tiny step?'"
-    "- 'Dude, the moon is 238,900 miles away. That is like 30 Earths lined up side by side. Crazy.'"
-
-    "EXAMPLE BAD RESPONSES (NEVER DO THIS):"
-    "- 'Great question! There are several things to consider about black holes. First, they form when...'"
-    "- 'The solar system has eight planets: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, and Neptune.'"
-    "- 'Let me explain this in a few different ways for you to understand better.'"
     )
 
 # ==================== PI DOG HABILITIES ====================
@@ -321,19 +302,6 @@ THINK_MODEL_THINK: bool = os.getenv("THINK_MODEL_THINK", "false").lower() == "tr
 if THINK_MODEL_THINK:
     log_config_error("THINK_MODEL_THINK is enabled. Model will output thinking tokens.", "INFO")
 
-# ==================== TEST MODE TIMEOUT SETTINGS ====================
-TEST_MODE_TIMEOUT_SECONDS: int = os.getenv("TEST_MODE_TIMEOUT_SECONDS", "60")
-try:
-    TEST_MODE_TIMEOUT_SECONDS = int(TEST_MODE_TIMEOUT_SECONDS)
-    if TEST_MODE_TIMEOUT_SECONDS <= 0:
-        raise ValueError()
-except ValueError:
-    log_config_error(f"TEST_MODE_TIMEOUT_SECONDS must be a positive integer, got {TEST_MODE_TIMEOUT_SECONDS}", "ERROR")
-    TEST_MODE_TIMEOUT_SECONDS = 60
-
-if TEST_MODE_TIMEOUT_SECONDS > 300:
-    log_config_error(f"TEST_MODE_TIMEOUT_SECONDS is very high ({TEST_MODE_TIMEOUT_SECONDS}s). Consider reducing for faster CI/CD", "WARNING")
-
 # ==================== PORT CONFLICT DETECTION SETTINGS ====================
 VILIB_PORT: int = os.getenv("VILIB_PORT", str(PORT_VILIB))
 try:
@@ -373,7 +341,6 @@ def print_config_summary():
         print(f"Face Tracking Enabled: {FACE_TRACKING_ENABLED}", file=sys.stderr)
         print(f"Face Tracking Speed: {FACE_TRACKING_SPEED}", file=sys.stderr)
         print(f"DEBUG_MODE: {DEBUG_MODE}", file=sys.stderr)
-        print(f"TEST_MODE_TIMEOUT_SECONDS: {TEST_MODE_TIMEOUT_SECONDS}s", file=sys.stderr)
         print(f"LOG_LEVEL: {LOG_LEVEL}", file=sys.stderr)
         print("=" * 60, file=sys.stderr)
 
