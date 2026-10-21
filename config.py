@@ -244,25 +244,31 @@ if FACE_TRACKING_PITCH_LIMIT <= 0 or FACE_TRACKING_PITCH_LIMIT > 90:
     FACE_TRACKING_PITCH_LIMIT = 30
 
 # ==================== TIMING SETTINGS ====================
-OLLAMA_TIMEOUT: int = os.getenv("OLLAMA_TIMEOUT", "30")
-if not OLLAMA_TIMEOUT.isdigit():
-    log_config_error(f"OLLAMA_TIMEOUT must be a positive integer, got {OLLAMA_TIMEOUT}", "ERROR")
-    OLLAMA_TIMEOUT = 30
+def _env_int(name: str, default: int) -> int:
+    """Read an env var as a positive int, falling back to default.
 
-KOKORO_TIMEOUT: int = os.getenv("KOKORO_TIMEOUT", "8")
-if not KOKORO_TIMEOUT.isdigit():
-    log_config_error(f"KOKORO_TIMEOUT must be a positive integer, got {KOKORO_TIMEOUT}", "ERROR")
-    KOKORO_TIMEOUT = 8
+    os.getenv() always returns a str. The old pattern validated with
+    .isdigit() but never converted, leaving strings at runtime - which is
+    what broke the LLM POST with `Invalid timeout (10, '30')`.
+    """
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        log_config_error(f"{name} must be a positive integer, got '{raw}'. Defaulting to {default}", "ERROR")
+        return default
+    if value <= 0:
+        log_config_error(f"{name} must be a positive integer, got {value}. Defaulting to {default}", "ERROR")
+        return default
+    return value
 
-STT_TIMEOUT: int = os.getenv("STT_TIMEOUT", "60")
-if not STT_TIMEOUT.isdigit():
-    log_config_error(f"STT_TIMEOUT must be a positive integer, got {STT_TIMEOUT}", "ERROR")
-    STT_TIMEOUT = 60
+OLLAMA_TIMEOUT: int = _env_int("OLLAMA_TIMEOUT", 30)
 
-WHISPER_HEALTH_TIMEOUT: int = os.getenv("WHISPER_HEALTH_TIMEOUT", "5")
-if not WHISPER_HEALTH_TIMEOUT.isdigit():
-    log_config_error(f"WHISPER_HEALTH_TIMEOUT must be a positive integer, got {WHISPER_HEALTH_TIMEOUT}", "ERROR")
-    WHISPER_HEALTH_TIMEOUT = 5
+KOKORO_TIMEOUT: int = _env_int("KOKORO_TIMEOUT", 8)
+
+STT_TIMEOUT: int = _env_int("STT_TIMEOUT", 60)
+
+WHISPER_HEALTH_TIMEOUT: int = _env_int("WHISPER_HEALTH_TIMEOUT", 5)
 
 AUDIO_WORKER_TIMEOUT: float = os.getenv("AUDIO_WORKER_TIMEOUT", "1.0")
 try:
@@ -271,15 +277,9 @@ except ValueError:
     log_config_error(f"AUDIO_WORKER_TIMEOUT must be a positive number, got {AUDIO_WORKER_TIMEOUT}", "ERROR")
     AUDIO_WORKER_TIMEOUT = 1.0
 
-FACE_THREAD_JOIN_TIMEOUT: int = os.getenv("FACE_THREAD_JOIN_TIMEOUT", "2")
-if not FACE_THREAD_JOIN_TIMEOUT.isdigit():
-    log_config_error(f"FACE_THREAD_JOIN_TIMEOUT must be a positive integer, got {FACE_THREAD_JOIN_TIMEOUT}", "ERROR")
-    FACE_THREAD_JOIN_TIMEOUT = 2
+FACE_THREAD_JOIN_TIMEOUT: int = _env_int("FACE_THREAD_JOIN_TIMEOUT", 2)
 
-MAX_RETRIES: int = os.getenv("MAX_RETRIES", "3")
-if not MAX_RETRIES.isdigit():
-    log_config_error(f"MAX_RETRIES must be a positive integer, got {MAX_RETRIES}", "ERROR")
-    MAX_RETRIES = 3
+MAX_RETRIES: int = _env_int("MAX_RETRIES", 3)
 
 # ==================== STORAGE SETTINGS ====================
 STORE_ROOT: str = os.getenv("STORE_ROOT", "/data/pidog/")

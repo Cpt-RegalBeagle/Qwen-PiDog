@@ -30,6 +30,10 @@ from pidog.preset_actions import (
     waiting as _pa_waiting,
 )
 
+# Module-level shared speaking lock (defined here so the `global` statements in
+# is_speaking() / music_play_file() / clear_speaking_flag() always resolve).
+_hardware_speaking_lock = False
+
 
 class PidogRPCHandler:
     """XML-RPC request handler for PiDog hardware control"""
@@ -289,16 +293,15 @@ class PidogRPCHandler:
         cmd = ['arecord', '-D', 'default', '-d', str(duration), '-f', 'S16_LE', '-r', '16000', '-c', '1', output_file]
 
         try:
-            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=duration + 10)
 
             if result.returncode == 0 and os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-                if output_file.startswith('/home/pidog/.cache/'):
-                    subprocess.run(['rm', '-f', output_file])
-
                 return {'status': 'success', 'message': f'Audio recorded successfully ({duration}s)', 'file_size': os.path.getsize(output_file), 'output_file': output_file}
             else:
                 error_detail = f"Return code: {result.returncode}, File exists: {os.path.exists(output_file)}, Size: {os.path.getsize(output_file) if os.path.exists(output_file) else 0}"
                 return {'status': 'error', 'message': f'Audio capture failed: {error_detail}'}
+        except subprocess.TimeoutExpired:
+            return {'status': 'error', 'message': f'arecord timed out after {duration + 10}s (audio device may be wedged)'}
         except FileNotFoundError as e:
             return {'status': 'error', 'message': f'arecord command not found. Install with: sudo apt install pulseaudio-utils'}
         except PermissionError as e:
@@ -325,12 +328,13 @@ class PidogRPCHandler:
 
     def clear_speaking_flag(self):
         """Clear internal speaking flag for state synchronization"""
+        global _hardware_speaking_lock
+
         if not self.dog:
             return {'status': 'success', 'message': 'No hardware to close'}
 
         try:
-            if hasattr(self, '_is_speaking_flag'):
-                self._is_speaking_flag = False
+            _hardware_speaking_lock = False
 
             return {'status': 'success', 'message': 'Speaking flag cleared'}
         except Exception:

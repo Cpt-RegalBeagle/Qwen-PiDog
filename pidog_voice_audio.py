@@ -4,6 +4,7 @@ import threading
 import shutil
 import struct
 import json
+import queue
 import requests
 import sys
 import config
@@ -22,6 +23,12 @@ is_running = True
 shutdown_requested = False
 is_speaking = False
 audio_worker_thread = None
+
+# Llama router load contract (mirrors main.py load_llama_model)
+LLM_LOAD_TIMEOUT: float = 120.0
+LLM_LOAD_POLL_INTERVAL: float = 2.0
+ROUTER_READY_STATES = ("loaded", "sleeping")
+ROUTER_IN_PROGRESS_STATES = ("loading", "downloading", "downloaded")
 
 
 def _init_session_file(audio_file, session_file):
@@ -139,10 +146,173 @@ def _start_audio_worker():
         _critical_error_exit("Audio worker initialization failed")
 
 
+def _router_model_state(entry):
+    """Normalize a /v1/models entry into (state, failed, exit_code)."""
+    if not isinstance(entry, dict):
+        return None, False, None
+    status = entry.get("status")
+    if isinstance(status, dict):
+        return status.get("value"), bool(status.get("failed")), status.get("exit_code")
+    # Older router builds may report a plain string status
+    return status, False, None
+
+
+def _ensure_llama_ready(model: str, timeout: float = LLM_LOAD_TIMEOUT, poll_interval: float = LLM_LOAD_POLL_INTERVAL) -> bool:
+    """
+    Ensures the voice model is resident in the llama.cpp router before the
+    chat POST. Triggers the router's POST /models/load when the model is
+    evicted, then polls GET /v1/models until the model reports a ready state.
+
+    The router's /models/load returns HTTP 200 as soon as the load is
+    *accepted*, not when it has *completed* - success is only confirmed by
+    polling. Failure is detected via status.failed / exit_code != 0 (child
+    process died, e.g. bad GGUF path), an 'incomplete' model file, an
+    unreachable router, or a timeout.
+    Returns a plain bool and never raises.
+    """
+    base_url = f"http://{config.SERVER_IP}:{config.PORT_OLLAMA}"
+
+    def fetch_entry():
+        """Return (entry, error): the model's /v1/models entry (or None) and an error string."""
+        try:
+            response = requests.get(f"{base_url}/v1/models", timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.exceptions.RequestException, ValueError) as e:
+            return None, str(e)
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        if isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, dict) and entry.get("id") == model:
+                    return entry, None
+        return None, None
+
+    try:
+        # 1) Pre-flight: router reachable and model registered in the preset
+        entry, err = fetch_entry()
+        if err:
+            print(f"  [LLM] Router unreachable, cannot verify model (non-fatal): {err}", file=sys.stderr, flush=True)
+            return False
+        if entry is None:
+            print(f"  [LLM] Model '{model}' not registered in router preset (non-fatal)", file=sys.stderr, flush=True)
+            return False
+
+        state, failed, exit_code = _router_model_state(entry)
+
+        # 2) Fast path: already resident
+        if state in ROUTER_READY_STATES:
+            print(f"  [LLM] Model already resident: {model}", file=sys.stderr, flush=True)
+            return True
+
+        # 3) Trigger the load (skip if one is already in progress)
+        if state not in ROUTER_IN_PROGRESS_STATES:
+            try:
+                response = requests.post(
+                    f"{base_url}/models/load",
+                    json={"model": model},
+                    headers={"Content-Type": "application/json"},
+                    timeout=60,
+                )
+            except requests.exceptions.RequestException as e:
+                print(f"  [LLM] Model load request failed (non-fatal): {e}", file=sys.stderr, flush=True)
+                return False
+
+            if response.status_code in (500, 503):
+                print("  [LLM] CRITICAL: Llama server error on model load, exiting...", file=sys.stderr, flush=True)
+                _critical_error_exit("LLM server unavailable")
+            if response.status_code != 200:
+                print(f"  [LLM] Model load rejected (status {response.status_code}) (non-fatal): {response.text[:200]}", file=sys.stderr, flush=True)
+                return False
+            print(f"  [LLM] Model load accepted for {model}; waiting for 'loaded'...", file=sys.stderr, flush=True)
+        else:
+            print(f"  [LLM] Model load already in progress ({state}); waiting...", file=sys.stderr, flush=True)
+
+        # 4) Poll until the model is loaded, fails, or times out
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(poll_interval)
+
+            entry, err = fetch_entry()
+            if err:
+                print(f"  [LLM] Transient router error while waiting for model: {err}", file=sys.stderr, flush=True)
+                continue
+            if entry is None:
+                continue
+
+            state, failed, exit_code = _router_model_state(entry)
+            if state in ROUTER_READY_STATES:
+                print(f"  [LLM] Model resident: {model}", file=sys.stderr, flush=True)
+                return True
+            if failed or (exit_code is not None and exit_code != 0):
+                print(f"  [LLM] Model load FAILED (state={state}, exit_code={exit_code}) (non-fatal)", file=sys.stderr, flush=True)
+                return False
+            if state == "incomplete":
+                print(f"  [LLM] Model file incomplete (non-fatal)", file=sys.stderr, flush=True)
+                return False
+            # otherwise loading/unloaded/etc. - keep polling
+
+        print(f"  [LLM] Model not ready within {timeout:.0f}s (non-fatal)", file=sys.stderr, flush=True)
+        return False
+
+    except Exception as e:
+        print(f"  [LLM] Error (non-fatal): {e}", file=sys.stderr, flush=True)
+        return False
+
+
+def _get_llm_response(text: str):
+    """Robot-side LLM bridge.
+
+    First ensures the voice model is resident in the llama.cpp router
+    (hot-swap via router /models/load + /v1/models polling), then POSTs
+    the STT transcription to the Llama OpenAI-compatible endpoint
+    (config.OLLAMA_STREAM_URL, non-streaming) and returns the assistant
+    reply string, or None on any failure. Must NEVER raise.
+    """
+    if not _ensure_llama_ready(config.TARGET_MODEL):
+        return None
+    try:
+        payload = {
+            "model": config.TARGET_MODEL,
+            "messages": [
+                {"role": "system", "content": config.SYSTEM_PROMPT},
+                {"role": "user", "content": text}
+            ],
+            "stream": False,
+            "max_tokens": 100
+        }
+
+        response = requests.post(
+            config.OLLAMA_STREAM_URL,
+            json=payload,
+            timeout=(10, config.OLLAMA_TIMEOUT)
+        )
+
+        if response.status_code == 500 or response.status_code == 503:
+            print("  [LLM] CRITICAL: Llama server error, exiting...", file=sys.stderr, flush=True)
+            _critical_error_exit("LLM server unavailable")
+
+        if response.status_code == 200:
+            data = response.json()
+            choices = data.get("choices")
+            content = ""
+            if choices:
+                content = (choices[0].get("message") or {}).get("content") or ""
+            content = str(content).strip()
+            return content if content else None
+
+        print(f"  [LLM] Error (non-fatal): unexpected status {response.status_code}", file=sys.stderr, flush=True)
+        return None
+
+    except Exception as e:
+        print(f"  [LLM] Error (non-fatal): {e}", file=sys.stderr, flush=True)
+        return None
+
+
 def _send_audio_to_stt(audio_file: str):
     """Send audio file to OpenWebUI for STT processing - INDEPENDENT OF FACE TRACKING"""
 
-    # OpenWebUI owns STT+LLM; response `text` is the LLM's spoken response - do NOT re-route to Ollama.
+    # OpenWebUI returns the STT transcription only; the robot then bridges it to
+    # the Llama LLM via _get_llm_response before speaking.
     try:
         stt_url = config.STT_HOST_URL
 
@@ -173,12 +343,25 @@ def _send_audio_to_stt(audio_file: str):
 
         if response.status_code == 200:
             stt_response = response.json()
-            llm_text = stt_response.get("text", "").strip()
+            transcription = stt_response.get("text", "").strip()
+            print(f"  [STT] Transcription: {transcription}", file=sys.stderr, flush=True)
+
+            if not transcription:
+                print("  [STT] Empty transcription - skipping", file=sys.stderr, flush=True)
+                return
+
+            llm_text = _get_llm_response(transcription)
 
             if llm_text and len(llm_text) > 3:
-                print(f"  [LLM] Response from OpenWebUI: {llm_text}", file=sys.stderr, flush=True)
-                personality_queue.put(llm_text)
+                print(f"  [LLM] Response: {llm_text}", file=sys.stderr, flush=True)
+                try:
+                    personality_queue.put_nowait(llm_text)
+                except queue.Full:
+                    print("  [AUDIO] Personality queue full - dropping message (non-fatal)", file=sys.stderr, flush=True)
                 _speak_text(llm_text)
+            else:
+                print("  [LLM] No usable response - skipping (non-fatal)", file=sys.stderr, flush=True)
+                return
         else:
             print(f"  [STT] Unexpected response {response.status_code}: {response.text[:200]}", file=sys.stderr, flush=True)
 
@@ -189,7 +372,7 @@ def _send_audio_to_stt(audio_file: str):
 def _speak_text(text: str):
     """Convert text to speech using Kokoro TTS"""
 
-    global is_speaking, is_running, shutdown_requested
+    global is_speaking
 
     try:
         kokoro_url = config.KOKORO_API_URL
@@ -236,8 +419,6 @@ def _speak_text(text: str):
 
             # Reset state flags for next VAD cycle
             is_speaking = False
-            is_running = True
-            shutdown_requested = False
 
             print(f"  [AUDIO] Software lock released. Ready for next VAD cycle.", file=sys.stderr, flush=True)
 

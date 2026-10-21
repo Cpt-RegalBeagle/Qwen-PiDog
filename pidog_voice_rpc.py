@@ -20,6 +20,23 @@ _TRANSIENT_ERRORS = (
 )
 
 
+class _TimeoutTransport(xmlrpc_client.Transport):
+    """Transport with a hard 20s socket timeout (H1).
+
+    A stuck single-threaded server handler must never be able to block the
+    calling thread forever in recv() - a blocked-but-alive thread is
+    invisible to the watchdog. On timeout the call raises TimeoutError,
+    which _classify() maps to ConnectionError (fail-fast: no retry, because
+    a fresh client proxy cannot unstick a busy server)."""
+
+    SOCKET_TIMEOUT = 20
+
+    def make_connection(self, host):
+        if isinstance(host, tuple):
+            return http.client.HTTPConnection(host[0], host[1], timeout=self.SOCKET_TIMEOUT)
+        return http.client.HTTPConnection(host, timeout=self.SOCKET_TIMEOUT)
+
+
 def _create_proxy():
     """Create a fresh ServerProxy and assign it to the rpc_client global.
 
@@ -30,7 +47,7 @@ def _create_proxy():
     # CRITICAL FIX: Use proper localhost address for hardware RPC server
     # The daemonized pidog_init.py runs on 127.0.0.1:8001 (NOT 127.0)
     server_url = "http://127.0.0.1:8001"
-    new_client = xmlrpc_client.ServerProxy(server_url)
+    new_client = xmlrpc_client.ServerProxy(server_url, transport=_TimeoutTransport())
     rpc_client = new_client
     return new_client
 
@@ -71,6 +88,12 @@ def _invoke_locked(method_name, args):
         return getattr(rpc_client, method_name)(*args)
 
     def _classify(exc):
+        # Fail-fast on socket timeouts (H1 _TimeoutTransport): the
+        # single-threaded server handler is stuck; a fresh client proxy
+        # cannot unstick it, so no retry - classify as critical now.
+        if isinstance(exc, TimeoutError):
+            print("  [RPC] CRITICAL: RPC server unresponsive (socket timeout)", file=sys.stderr, flush=True)
+            raise ConnectionError("RPC server unreachable") from exc
         error_msg = str(exc).lower()
         # Only catch ACTUAL critical errors - connection failures
         if any(keyword in error_msg for keyword in [

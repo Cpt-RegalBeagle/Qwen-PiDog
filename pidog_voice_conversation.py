@@ -51,24 +51,37 @@ def _init_rgb():
                 time.sleep(retry_delay)
 
 
+# Sustained-outage counter: a permanent RPC outage must self-terminate the
+# voice subprocess (os._exit -> main.py watchdog) instead of retrying forever.
+# A failed check keeps last_check_time stale, so a check is due every ~3s;
+# 100 consecutive failures ~= 5 minutes of sustained outage.
+_health_fail_streak = 0
+
+
 def _maybe_health_check(last_check_time):
-    """Perform RPC health check if due. Returns updated last_check_time."""
+    """Perform RPC health check if due. Returns updated last_check_time.
+
+    Single fail-soft path for ALL errors: the old separate ConnectionError
+    branch plus the dead-code keyword check in the generic branch are
+    collapsed (those keywords already arrive as ConnectionError via
+    _classify, and a raw keyword check could never see them otherwise).
+    """
+    global _health_fail_streak
     current = time.time()
     if current - last_check_time < 10:
         return last_check_time
     try:
         result = _rpc_call_with_timeout('status')
+        _health_fail_streak = 0
         print("  [INFO] Health check result: %s" % result, file=sys.stderr, flush=True)
         return current
-    except ConnectionError as e:
-        print("  [WARNING] RPC temporarily unavailable: %s" % e, file=sys.stderr, flush=True)
+    except Exception as e:
+        _health_fail_streak += 1
+        if _health_fail_streak >= 100:
+            _critical_error_exit("RPC server unreachable (sustained outage)")
+        print("  [WARNING] RPC health check failed (%d consecutive): %s" % (_health_fail_streak, e), file=sys.stderr, flush=True)
         time.sleep(2)
         return last_check_time
-    except Exception as e:
-        error_msg = str(e)
-        if "Connection refused" in error_msg or "timed out" in error_msg.lower():
-            _critical_error_exit("RPC server unreachable")
-        return current
 
 
 def _maybe_restart_audio_worker():
@@ -87,6 +100,10 @@ def _cleanup_threads():
 
     is_running = False
     stop_personality_engine()
+    # Stop the audio module's own worker loop condition BEFORE the join so the
+    # daemon worker exits cleanly instead of relying on the join timeout.
+    pidog_voice_audio.is_running = False
+    pidog_voice_audio.shutdown_requested = True
     if pidog_voice_audio.audio_worker_thread and pidog_voice_audio.audio_worker_thread.is_alive():
         try:
             pidog_voice_audio.audio_worker_thread.join(timeout=2)
