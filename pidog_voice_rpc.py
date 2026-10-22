@@ -27,14 +27,36 @@ class _TimeoutTransport(xmlrpc_client.Transport):
     calling thread forever in recv() - a blocked-but-alive thread is
     invisible to the watchdog. On timeout the call raises TimeoutError,
     which _classify() maps to ConnectionError (fail-fast: no retry, because
-    a fresh client proxy cannot unstick a busy server)."""
+    a fresh client proxy cannot unstick a busy server).
+
+    `socket_timeout` optionally overrides the class-level SOCKET_TIMEOUT (20)
+    for a DEDICATED proxy (e.g. the 2.0s playback-polling proxy); passing None
+    keeps the class default so every existing caller is unchanged."""
 
     SOCKET_TIMEOUT = 20
+
+    def __init__(self, socket_timeout=None):
+        super().__init__()
+        if socket_timeout is not None:
+            self.SOCKET_TIMEOUT = socket_timeout
 
     def make_connection(self, host):
         if isinstance(host, tuple):
             return http.client.HTTPConnection(host[0], host[1], timeout=self.SOCKET_TIMEOUT)
         return http.client.HTTPConnection(host, timeout=self.SOCKET_TIMEOUT)
+
+
+def _build_proxy(socket_timeout=None):
+    """Build a fresh ServerProxy WITHOUT touching the shared rpc_client global.
+
+    Lets a caller build a DEDICATED proxy (e.g. the short-timeout playback
+    polling proxy) that does not clobber the shared client. `socket_timeout`
+    optionally overrides the 20s class default; None keeps it. The shared
+    client is only (re)assigned by _create_proxy() under _RPC_LOCK."""
+    # CRITICAL FIX: Use proper localhost address for hardware RPC server
+    # The daemonized pidog_init.py runs on 127.0.0.1:8001 (NOT 127.0)
+    server_url = "http://127.0.0.1:8001"
+    return xmlrpc_client.ServerProxy(server_url, transport=_TimeoutTransport(socket_timeout))
 
 
 def _create_proxy():
@@ -44,10 +66,7 @@ def _create_proxy():
     success (the assignment is the last step)."""
     global rpc_client
 
-    # CRITICAL FIX: Use proper localhost address for hardware RPC server
-    # The daemonized pidog_init.py runs on 127.0.0.1:8001 (NOT 127.0)
-    server_url = "http://127.0.0.1:8001"
-    new_client = xmlrpc_client.ServerProxy(server_url, transport=_TimeoutTransport())
+    new_client = _build_proxy()
     rpc_client = new_client
     return new_client
 

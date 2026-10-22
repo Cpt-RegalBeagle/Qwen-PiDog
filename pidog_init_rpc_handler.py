@@ -58,6 +58,11 @@ class PidogRPCHandler:
         # Prevents 'GPIO busy' when background thread and RPC handler contend
         self._ears_spi_lock = threading.Lock()
 
+        # Option C: tracked TTS playback state (single playback thread)
+        self._sound_thread = None
+        self._sound_stop_requested = False
+        self._current_sound = None
+
         # Ears sensor is already initialized by pidog_init.py hardware setup.
         # Do NOT re-create it - that would orphan the original GPIO/SPI handles
         # and cause 'GPIO busy' on every subsequent read.
@@ -310,21 +315,8 @@ class PidogRPCHandler:
             return {'status': 'error', 'message': f'Subprocess exception: {str(e)}'}
 
     def is_speaking(self) -> bool:
-        """Verifies our explicit server-side state lock status against the music thread lifecycle."""
-        global _hardware_speaking_lock
-
-        if not self.dog:
-            return False
-
-        try:
-            if hasattr(self.dog, 'music') and self.dog.music.sound_thread is not None:
-                if self.dog.music.sound_thread.is_alive():
-                    return True
-        except Exception:
-            pass
-
-        _hardware_speaking_lock = False
-        return _hardware_speaking_lock
+        """Delegates to tracked playback-thread state (Option C)."""
+        return self.is_music_playing()
 
     def clear_speaking_flag(self):
         """Clear internal speaking flag for state synchronization"""
@@ -340,8 +332,31 @@ class PidogRPCHandler:
         except Exception:
             return {'status': 'error', 'message': 'Failed to clear speaking flag'}
 
+    def _tracked_sound_play(self, filename, volume):
+        """Mirror of SDK Music.sound_play (music.py L170-185) using the SDK's own
+        initialized pygame mixer. Waits get_length() in 0.05 s slices so a stop
+        request can interrupt the wait."""
+        sound = self.dog.music.pygame.mixer.Sound(filename)
+        sound.set_volume(round(volume/100.0, 2))
+
+        if self._sound_stop_requested:
+            # Stop was requested during decode - never start audio
+            return
+
+        # Store AFTER successful decode so hard stop can interrupt playback
+        self._current_sound = sound
+        try:
+            sound.play()
+            remaining = sound.get_length()
+            while remaining > 0 and not self._sound_stop_requested:
+                step = min(0.05, remaining)
+                time.sleep(step)
+                remaining -= step
+        finally:
+            self._current_sound = None
+
     def music_play_file(self, audio_file: str):
-        """Plays audio through the music module, engaging an explicit hardware state lock."""
+        """Plays audio in a handler-owned, stop-interruptible thread (single-playback invariant)."""
         global _hardware_speaking_lock
 
         if not self.dog:
@@ -349,14 +364,50 @@ class PidogRPCHandler:
 
         try:
             if hasattr(self.dog, 'music'):
+                # STOP-STALE-FIRST: interrupt any live playback before starting new audio
+                if self._sound_thread is not None and self._sound_thread.is_alive():
+                    self._sound_stop_requested = True
+                    if self._current_sound is not None:
+                        try:
+                            self._current_sound.stop()
+                        except Exception:
+                            pass
+                    self._sound_thread.join(timeout=1.0)
+
+                self._sound_stop_requested = False
+
+                # Compat only - tracked thread state is now the source of truth
                 _hardware_speaking_lock = True
-                self.dog.music.sound_play_threading(audio_file, 100)
-                return {'status': 'success', 'message': f'Playing audio from {audio_file}'}
+                volume = 100
+                self._sound_thread = threading.Thread(
+                    target=self._tracked_sound_play,
+                    args=(audio_file, volume),
+                    name="Tracked Sound Play Thread",
+                    daemon=True)
+                self._sound_thread.start()
+                return {'status': 'success', 'message': f'Playing: {audio_file}'}
             else:
                 raise Exception("Music module not available")
         except Exception:
             _hardware_speaking_lock = False
             raise Exception("Music playback error")
+
+    def is_music_playing(self) -> bool:
+        """True while a tracked playback thread is alive and not stopped.
+        Pure thread-alive check - no pygame, no I/O (cheap to poll ~2/s)."""
+        return self._sound_thread is not None and self._sound_thread.is_alive() and not self._sound_stop_requested
+
+    def music_stop(self):
+        """Request stop, hard-stop the decoded Sound, and join the playback thread."""
+        self._sound_stop_requested = True
+        if self._current_sound is not None:
+            try:
+                self._current_sound.stop()
+            except Exception:
+                pass
+        if self._sound_thread is not None:
+            self._sound_thread.join(timeout=1.0)
+        return {'status': 'success', 'message': 'stop requested'}
 
     def close(self):
         """Safely closes the PiDog instance and releases hardware channels across any thread context."""

@@ -7,6 +7,8 @@ import json
 import queue
 import requests
 import sys
+import io
+import wave
 import config
 
 import pidog_voice_rpc
@@ -22,6 +24,10 @@ from pidog_personality_engine import personality_queue
 is_running = True
 shutdown_requested = False
 is_speaking = False
+# SOLE cross-thread speaking gate (single-writer: only _speak_text writes).
+# is_speaking_deadline is a monotonic-seconds bound; the gate is EXPIRED when
+# time.monotonic() >= is_speaking_deadline. The VAD loop only READS both.
+is_speaking_deadline = 0.0
 audio_worker_thread = None
 
 # Llama router load contract (mirrors main.py load_llama_model)
@@ -98,6 +104,13 @@ def _start_audio_worker():
             print("  [AUDIO] Dynamic VAD engine initialized. Idling for voice activity...", file=sys.stderr, flush=True)
 
             while is_running and not shutdown_requested:
+                # Speaking gate: while TTS playback is active (and within its
+                # finite deadline) skip VAD. READ-ONLY here (never written); a
+                # gate past its deadline is treated as expired without any write,
+                # preserving the single-writer invariant.
+                if is_speaking and time.monotonic() < is_speaking_deadline:
+                    time.sleep(0.5); continue
+
                 # Phase 1: VAD - record 1s snippet from the recording mic (sound card)
                 result = _rpc_call_with_timeout('audio_record', 1, audio_file)
                 if not result or result.get('status') != 'success':
@@ -369,10 +382,101 @@ def _send_audio_to_stt(audio_file: str):
         print(f"  [STT] Error processing audio (non-fatal): {e}", file=sys.stderr, flush=True)
 
 
-def _speak_text(text: str):
-    """Convert text to speech using Kokoro TTS"""
+def _wav_duration_seconds(wav_bytes_or_path):
+    """Return the EXACT duration (seconds) of a WAV.
 
-    global is_speaking
+    Accepts raw WAV bytes (preferred - the TTS bytes are already in memory) or a
+    file path. Uses stdlib wave + io.BytesIO. On ANY failure returns
+    config.PLAYBACK_FALLBACK_DURATION (fail-closed: a generous FINITE bound,
+    never zero, so the gate always carries a finite deadline)."""
+    try:
+        if isinstance(wav_bytes_or_path, bytes):
+            with wave.open(io.BytesIO(wav_bytes_or_path), 'rb') as w:
+                nframes = w.getnframes()
+                framerate = w.getframerate()
+        else:
+            with wave.open(wav_bytes_or_path, 'rb') as w:
+                nframes = w.getnframes()
+                framerate = w.getframerate()
+        if not framerate or framerate <= 0:
+            return config.PLAYBACK_FALLBACK_DURATION
+        return float(nframes) / float(framerate)
+    except Exception:
+        return config.PLAYBACK_FALLBACK_DURATION
+
+
+def _best_effort_music_stop():
+    """Best-effort music_stop() over a DEDICATED 2.0s-timeout proxy so a
+    stuck server can never hold the worker for the shared client's 20s.
+    Never raises (watchdog path)."""
+    try:
+        stop_proxy = pidog_voice_rpc._build_proxy(socket_timeout=2.0)
+        stop_proxy.music_stop()
+    except Exception as e:
+        print(f"  [TTS] music_stop() best-effort failed (non-fatal): {e}", file=sys.stderr, flush=True)
+
+
+def _wait_playback_end(duration):
+    """Block (on the EXISTING worker thread) until the tracked playback ends.
+
+    Polls is_music_playing() over a DEDICATED 2.0s-timeout proxy (built via
+    _build_proxy) - NOT the shared 20s proxy - so a stuck poll can never blow
+    the watchdog bound. Fail-closed: an RPC/timeout error is treated as 'still
+    playing'. If the watchdog deadline (duration + PLAYBACK_WATCHDOG_MARGIN)
+    fires, a best-effort music_stop() is sent and we return. No new thread/lock -
+    this runs on the calling worker thread."""
+    start = time.monotonic()
+    deadline = start + duration + config.PLAYBACK_WATCHDOG_MARGIN
+
+    try:
+        poll_proxy = pidog_voice_rpc._build_proxy(socket_timeout=2.0)
+    except Exception as e:
+        # Cannot even build the polling proxy: fail-closed. Sleep to the bound,
+        # best-effort stop, and return (the gate deadline is the second bound).
+        print(f"  [TTS] WARNING: playback-poll proxy build failed ({e}); relying on watchdog", file=sys.stderr, flush=True)
+        time.sleep(max(0.0, deadline - time.monotonic()))
+        _best_effort_music_stop()
+        print("  [TTS] WATCHDOG fired (poll-proxy unavailable) - forcing stop", file=sys.stderr, flush=True)
+        return
+
+    while True:
+        # Poll playback status over the dedicated short-timeout proxy.
+        try:
+            if not poll_proxy.is_music_playing():
+                # Returned False -> playback ended (accurate detection).
+                print(f"  [TTS] playback ended (detected) after {time.monotonic() - start:.1f} s", file=sys.stderr, flush=True)
+                return
+        except Exception:
+            pass  # fail-closed: RPC/timeout => assume still playing, keep waiting
+
+        if time.monotonic() >= deadline:
+            _best_effort_music_stop()
+            print(f"  [TTS] WATCHDOG fired after {time.monotonic() - start:.1f} s (bound {duration + config.PLAYBACK_WATCHDOG_MARGIN:.1f} s) - forcing stop", file=sys.stderr, flush=True)
+            return
+
+        time.sleep(min(config.PLAYBACK_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
+
+
+def _release_speak_gate():
+    """Single release funnel: clear the speaking gate + its deadline."""
+    global is_speaking, is_speaking_deadline
+    is_speaking = False
+    is_speaking_deadline = 0.0
+
+
+def _speak_text(text: str):
+    """Convert text to speech using Kokoro TTS.
+
+    Straight-line, single-writer, fail-closed. The speaking gate
+    (is_speaking / is_speaking_deadline) is armed BEFORE any audio can start and
+    ALWAYS carries a finite deadline; it is released on EVERY exit path via the
+    finally funnel (the VAD-loop deadline check is the second bound)."""
+
+    global is_speaking, is_speaking_deadline
+
+    duration = config.PLAYBACK_FALLBACK_DURATION
+    gate_armed = False
+    started = False
 
     try:
         kokoro_url = config.KOKORO_API_URL
@@ -392,38 +496,65 @@ def _speak_text(text: str):
             "speed": 1.0
         }
 
+        # Kokoro TTS POST kept as-is (raises on network error). The gate is NOT
+        # armed yet on this path, so a failure here leaks nothing.
         response = requests.post(kokoro_url, headers=headers, json=payload, timeout=(10, 120))
 
-        if response.status_code == 200:
-            print(f"  [TTS] TTS complete, playing audio...", file=sys.stderr)
+        if response.status_code != 200:
+            print(f"  [TTS] TTS returned HTTP {response.status_code} - not speaking", file=sys.stderr, flush=True)
+            return
 
-            is_speaking = True
+        print(f"  [TTS] TTS complete, playing audio...", file=sys.stderr)
 
-            audio_data = response.content
-            audio_file = "/tmp/temp_audio.wav"
-            with open(audio_file, 'wb') as f:
-                f.write(audio_data)
+        audio_data = response.content
+        audio_file = "/tmp/temp_audio.wav"
 
-            print(f"  [AUDIO] Audio file written ({len(audio_data)} bytes), playing...", file=sys.stderr)
+        # Exact duration from the TTS bytes (already in memory); fail-closed
+        # fallback (PLAYBACK_FALLBACK_DURATION) on any parse failure.
+        duration = _wav_duration_seconds(audio_data)
 
-            if pidog_voice_rpc.rpc_client is not None:
+        # ARM the gate BEFORE any audio can start (before music_play_file).
+        # deadline = duration + watchdog margin + echo settle + one VAD yield.
+        is_speaking = True
+        is_speaking_deadline = (time.monotonic() + duration
+                               + config.PLAYBACK_WATCHDOG_MARGIN
+                               + config.PLAYBACK_SETTLE
+                               + 0.5)
+        gate_armed = True
+        print(f"  [TTS] armed gate (duration={duration:.1f} s, deadline=+{is_speaking_deadline - time.monotonic():.1f} s)", file=sys.stderr, flush=True)
+
+        with open(audio_file, 'wb') as f:
+            f.write(audio_data)
+
+        print(f"  [AUDIO] Audio file written ({len(audio_data)} bytes), playing...", file=sys.stderr, flush=True)
+
+        # Send music_play_file (existing rpc_client-is-not-None guard).
+        # Fail-closed: a play-RPC failure sets started=False but does NOT abort
+        # the wait - unknown state => stay gated until the deadline.
+        if pidog_voice_rpc.rpc_client is not None:
+            try:
                 _rpc_call('music_play_file', audio_file)
+                started = True
+            except Exception as play_err:
+                print(f"  [TTS] music_play_file failed (fail-closed, still gated): {play_err}", file=sys.stderr, flush=True)
+        else:
+            print("  [TTS] rpc_client is None - skipping music_play_file (fail-closed, still gated)", file=sys.stderr, flush=True)
 
-            # 9-SECOND SAFETY LOCKOUT - covers physical playback + echo resolution
-            print(f"  [AUDIO] Safety lockout active: Waiting 9.0 seconds for voice rendering and echo resolution...", file=sys.stderr, flush=True)
-            time.sleep(9.0)
+        # Accurate playback-end detection (poll + watchdog, fail-closed).
+        _wait_playback_end(duration)
 
-            # Hardware settle delay - let Pi finish releasing audio hardware
-            print(f"  [AUDIO] Hardware settle delay: Waiting 0.5 seconds for audio bus to clear...", file=sys.stderr, flush=True)
-            time.sleep(0.5)
+        # 0.2s echo/reverb settle lives HERE (conversation side).
+        time.sleep(config.PLAYBACK_SETTLE)
 
-            # Reset state flags for next VAD cycle
-            is_speaking = False
-
-            print(f"  [AUDIO] Software lock released. Ready for next VAD cycle.", file=sys.stderr, flush=True)
+        print(f"  [TTS] gate released (settle 0.2 s complete; started={started})", file=sys.stderr, flush=True)
 
     except Exception as e:
         print(f"  [AUDIO] Error playing audio (non-fatal): {e}", file=sys.stderr, flush=True)
+    finally:
+        # Single release funnel - EVERY exit path (success, TTS failure,
+        # play-RPC failure, watchdog) clears the gate here.
+        if gate_armed:
+            _release_speak_gate()
 
 
 def get_wav_volume(file_path):

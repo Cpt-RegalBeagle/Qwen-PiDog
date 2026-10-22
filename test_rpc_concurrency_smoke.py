@@ -10,9 +10,13 @@ default  : If the real robot RPC server already owns 127.0.0.1:8001 and
            (real-stack mode - no hardware movement, no mic capture).
            Otherwise spin up an in-process single-threaded
            SimpleXMLRPCServer on 127.0.0.1:8001 (mock mode) with
-           `status` + `audio_record` endpoints and hammer both - the same
-           race topology as production (audio worker audio_record +
-           main-loop status health checks + personality fire-threads).
+           `status` + `audio_record` + `music_play_file` +
+           `is_music_playing` + `music_stop` endpoints and hammer both -
+           the same race topology as production (audio worker audio_record
+           + main-loop status health checks + personality fire-threads).
+           In mock mode the run ALSO drives
+           pidog_voice_audio._wait_playback_end offline (Option C) to
+           exercise the poll-detect, watchdog and fail-closed paths.
            All locked-mode calls go through the PUBLIC
            pidog_voice_rpc._rpc_call_with_timeout entry point, i.e. the
            exact code path the audio worker, health check and personality
@@ -84,10 +88,33 @@ class MockPidogServer:
         self.server = SimpleXMLRPCServer((HOST, PORT), logRequests=False)
         self.server.register_function(self.status, "status")
         self.server.register_function(self.audio_record, "audio_record")
+        self.server.register_function(self.music_play_file, "music_play_file")
+        self.server.register_function(self.is_music_playing, "is_music_playing")
+        self.server.register_function(self.music_stop, "music_stop")
+        # Option C mock playback state (driven by run_playback_detection).
+        self.music_playing = False
+        self.music_polls = 0
+        self.music_play_calls = 0
+        self.music_stop_calls = 0
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     def status(self):
         return {"status": "ok", "initialized": True}
+
+    def music_play_file(self, audio_file):
+        # LIVE contract: returns a dict immediately = playback started.
+        self.music_play_calls += 1
+        self.music_playing = True
+        return {"status": "success", "file": audio_file}
+
+    def is_music_playing(self):
+        self.music_polls += 1
+        return self.music_playing
+
+    def music_stop(self):
+        self.music_stop_calls += 1
+        self.music_playing = False
+        return {"status": "ok"}
 
     def audio_record(self, duration, output_file):
         # Mimic a ~1s capture without hardware: produce a small file the
@@ -222,6 +249,69 @@ def run_baseline():
         print("run does NOT invalidate the harness.")
 
 
+def run_playback_detection(mock):
+    """Mock-mode ONLY: drive pidog_voice_audio._wait_playback_end offline
+    against the mock music_* endpoints. Covers the three Option C paths:
+    poll-detect (playback ends early), watchdog (server stuck playing), and
+    fail-closed (server gone => treated as still playing). NEVER run against
+    the real robot - music_play_file would start real audio."""
+    try:
+        import config as cfg
+        import pidog_voice_audio as audio_mod
+    except Exception as e:
+        print("FATAL: cannot import pidog_voice_audio for playback scenarios: %r" % (e,))
+        return False
+
+    old_margin = cfg.PLAYBACK_WATCHDOG_MARGIN
+    cfg.PLAYBACK_WATCHDOG_MARGIN = 1.0  # keep the offline run fast
+    passed = True
+    try:
+        # (1) Accurate end detection: mock stops "playing" mid-way; the wait
+        #     must return at playback end, well BEFORE the watchdog bound.
+        mock.music_playing = True
+        mock.music_polls = 0
+        flipper = threading.Thread(
+            target=lambda: (time.sleep(0.7), setattr(mock, "music_playing", False)),
+            daemon=True)
+        flipper.start()
+        t0 = time.monotonic()
+        audio_mod._wait_playback_end(2.0)
+        elapsed = time.monotonic() - t0
+        flipper.join()
+        ok = 0.6 <= elapsed < 2.0
+        passed = passed and ok
+        print("[%s] %s (elapsed=%.2fs, expected ~1.0-1.5s before bound 3.0s)"
+              % ("PASS" if ok else "FAIL", "poll-detect", elapsed))
+
+        # (2) Watchdog: playback never reports ended; the wait must return at
+        #     ~duration+margin and the mock must have received music_stop.
+        mock.music_playing = True
+        mock.music_polls = 0
+        mock.music_stop_calls = 0
+        t0 = time.monotonic()
+        audio_mod._wait_playback_end(1.0)
+        elapsed = time.monotonic() - t0
+        ok = elapsed >= 1.9 and mock.music_stop_calls >= 1
+        passed = passed and ok
+        print("[%s] %s (elapsed=%.2fs, bound=2.0s, stop_calls=%d)"
+              % ("PASS" if ok else "FAIL", "watchdog", elapsed, mock.music_stop_calls))
+
+        # (3) Fail-closed: server gone; every poll raises (treated as still
+        #     playing) and the wait must hold until the bound, no crash.
+        mock.server.shutdown()
+        time.sleep(0.2)
+        t0 = time.monotonic()
+        audio_mod._wait_playback_end(1.0)
+        elapsed = time.monotonic() - t0
+        ok = elapsed >= 1.9
+        passed = passed and ok
+        print("[%s] %s (elapsed=%.2fs, bound=2.0s, fail-closed held)"
+              % ("PASS" if ok else "FAIL", "fail-closed", elapsed))
+    finally:
+        cfg.PLAYBACK_WATCHDOG_MARGIN = old_margin
+    return passed
+
+
 def main():
     parser = argparse.ArgumentParser(description="XML-RPC concurrency smoke test")
     parser.add_argument("--baseline", action="store_true",
@@ -240,6 +330,11 @@ def main():
             run_baseline()
         else:
             passed = run_locked_hammer(real_mode)
+            if mock is None:
+                print("[SMOKE] Real-stack mode - skipping offline playback-detection "
+                      "scenarios (they must never drive real robot audio).")
+            else:
+                passed = run_playback_detection(mock) and passed
             sys.exit(0 if passed else 1)
     except SystemExit:
         raise

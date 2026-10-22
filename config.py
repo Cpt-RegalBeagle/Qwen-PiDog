@@ -277,6 +277,15 @@ except ValueError:
     log_config_error(f"AUDIO_WORKER_TIMEOUT must be a positive number, got {AUDIO_WORKER_TIMEOUT}", "ERROR")
     AUDIO_WORKER_TIMEOUT = 1.0
 
+# ==================== PLAYBACK END-DETECTION (Option C) ====================
+# Accurate TTS playback-end detection: the speaking gate is released on real
+# playback end (polled via is_music_playing) instead of a fixed sleep. All
+# values below are in seconds.
+PLAYBACK_POLL_INTERVAL = 0.5        # is_music_playing() poll cadence
+PLAYBACK_SETTLE = 0.2               # echo/reverb settle after playback ends
+PLAYBACK_WATCHDOG_MARGIN = 3.0      # extra bound beyond expected duration
+PLAYBACK_FALLBACK_DURATION = 9.5    # assumed duration if the WAV parse fails
+
 FACE_THREAD_JOIN_TIMEOUT: int = _env_int("FACE_THREAD_JOIN_TIMEOUT", 2)
 
 MAX_RETRIES: int = _env_int("MAX_RETRIES", 3)
