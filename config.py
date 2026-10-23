@@ -161,6 +161,8 @@ SYSTEM_PROMPT: str = (
     "- Start with the answer or the fun part. No 'Great question!' preambles."
     "- If he seems to lose focus or asks something random, just roll with it happily."
     "- Never lecture. Never give more than one fact unless he asks for more."
+
+    "COMMANDS: If Carter gives a direct action command (walk, come here, dance, sit, spin, bark…), the robot is ALREADY doing it. Reply with 3-5 words of hype only ('On it!'). Never explain, never ask, never repeat the command word."
     )
 
 # ==================== PI DOG HABILITIES ====================

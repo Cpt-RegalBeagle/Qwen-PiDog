@@ -13,6 +13,9 @@ from pidog_voice_audio import _start_audio_worker
 # Import personality engine
 from pidog_personality_engine import start_personality_engine, stop_personality_engine
 
+# Import command engine (filters the USER's STT for direct action commands)
+from pidog_command_engine import start_command_engine, stop_command_engine
+
 # ==================== MODULE-LEVEL STATE ====================
 is_running = True
 shutdown_requested = False
@@ -100,6 +103,7 @@ def _cleanup_threads():
 
     is_running = False
     stop_personality_engine()
+    stop_command_engine()
     # Stop the audio module's own worker loop condition BEFORE the join so the
     # daemon worker exits cleanly instead of relying on the join timeout.
     pidog_voice_audio.is_running = False
@@ -127,6 +131,9 @@ def main():
 
     # Start personality engine (scans AI responses for trigger words, fires RPC actions)
     start_personality_engine(pidog_voice_rpc.rpc_client)
+
+    # Start command engine (scans the USER's STT for direct action commands, fires RPC actions)
+    start_command_engine(pidog_voice_rpc.rpc_client)
 
     # Start VAD audio worker (listens for human speech -> STT -> LLM -> TTS)
     _start_audio_worker()

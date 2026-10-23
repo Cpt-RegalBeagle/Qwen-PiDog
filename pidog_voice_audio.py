@@ -19,6 +19,7 @@ from pidog_voice_rpc import (
 )
 
 from pidog_personality_engine import personality_queue
+from pidog_command_engine import command_queue
 
 # ==================== MODULE-LEVEL GLOBALS ====================
 is_running = True
@@ -362,6 +363,13 @@ def _send_audio_to_stt(audio_file: str):
             if not transcription:
                 print("  [STT] Empty transcription - skipping", file=sys.stderr, flush=True)
                 return
+
+            # Enqueue the USER's transcription for the command engine (fires
+            # direct action commands, incl. locomotion) BEFORE the LLM call.
+            try:
+                command_queue.put_nowait(transcription)
+            except queue.Full:
+                pass  # drop, mirror the existing personality_queue drop handling
 
             llm_text = _get_llm_response(transcription)
 
