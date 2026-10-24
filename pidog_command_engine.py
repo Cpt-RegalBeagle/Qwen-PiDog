@@ -1,31 +1,4 @@
-"""
-pidog_command_engine.py
-Background thread that scans the USER's STT transcription for direct
-action commands and fires matching RPC actions in fire-and-forget daemon
-threads.
-
-This is the locomotion-capable sibling of pidog_personality_engine.py.
-Where the personality engine filters the LLM's response text (what the
-robot says back), this engine filters the USER's transcription (what
-Carter says to the robot) and matches ALL actions - both stationary
-PERSONALITY_ACTIONS and locomotive MOVEMENT_ACTIONS.
-
-Integration (pidog_voice_audio.py, inside _send_audio_to_stt):
-
-    from pidog_command_engine import command_queue
-    command_queue.put_nowait(transcription)
-
-That is the only modification to the voice module.
-
-Matching uses word-boundary regex so "walk" triggers on "Walk over here!"
-but NOT on "walkway" or "walked".
-
-Shared cooldown: this engine imports the personality engine's module-level
-_last_fire dict and uses it for its own cooldown checks. That way a command
-the user says ("let's dance") and the LLM's echo of it ("Let's dance!")
-cannot double-fire the same action within COOLDOWN_SECONDS. Dict get/set is
-GIL-atomic, so no lock is needed.
-"""
+"""Background thread scanning the USER's STT transcription for direct action commands; fires matching RPC actions in fire-and-forget daemon threads. Shares pidog_personality_engine's _last_fire cooldown dict."""
 
 import queue
 import re
@@ -37,6 +10,9 @@ from itertools import chain
 from pidog_actions_dictionary import (
     PERSONALITY_ACTIONS,
     MOVEMENT_ACTIONS,
+)
+
+from config import (
     COOLDOWN_SECONDS,
     MAX_ACTIONS_PER_MESSAGE,
     ENABLED,
@@ -45,13 +21,10 @@ from pidog_actions_dictionary import (
 
 from pidog_voice_rpc import _rpc_call_with_timeout
 
-# Shared cooldown state: the SAME dict the personality engine reads/writes.
-# Importing the name binds us to the same dict object; both engines mutate
-# it in place (never rebind it), so the reference stays valid.
+# Shared cooldown state: same _last_fire dict as pidog_personality_engine (mutated in place, never rebound).
 from pidog_personality_engine import _last_fire
 
-# Shared queue: voice module puts the USER's transcription here, engine
-# thread reads it.
+# Shared queue: voice module puts the USER's transcription here; engine thread reads it.
 command_queue = queue.Queue(maxsize=64)
 
 # Internal state
@@ -65,8 +38,7 @@ def _fire_rpc(rpc_client, method_name, args):
         # Truthiness guard only - keep the early-out for a missing proxy.
         if not rpc_client:
             return
-        # Route through the locked helper so we serialize with the audio
-        # worker on the shared ServerProxy. Never raises.
+        # Route through the locked helper to serialize on the shared ServerProxy. Never raises.
         try:
             _rpc_call_with_timeout(method_name, *args)
         except Exception as e:
@@ -82,11 +54,7 @@ def _fire_rpc(rpc_client, method_name, args):
 
 
 def _check_cooldown(method_name):
-    """Return True if the action is allowed (not in cooldown).
-
-    Reads the personality engine's shared _last_fire dict so a user command
-    and the LLM's echo of it share one cooldown window (no double-fire).
-    """
+    """Return True if the action is allowed (not in cooldown); shares the personality engine's _last_fire dict (no double-fire)."""
     now = time.monotonic()
     last = _last_fire.get(method_name)
     if last is None:
@@ -97,12 +65,7 @@ def _check_cooldown(method_name):
 
 
 def _scan_text(text, rpc_client):
-    """
-    Scan the USER's transcription for triggers using word-boundary regex.
-
-    Matches ALL actions: stationary PERSONALITY_ACTIONS plus locomotive
-    MOVEMENT_ACTIONS. "walk" matches "Walk over here!" but NOT "walkway".
-    """
+    """Scan the USER's transcription for triggers (word-boundary regex); matches all actions: PERSONALITY_ACTIONS plus MOVEMENT_ACTIONS."""
     if not ENABLED:
         return
     if not text or not isinstance(text, str):
@@ -143,10 +106,7 @@ def _engine_loop(rpc_client):
 
 
 def start_command_engine(rpc_client):
-    """
-    Launch the command engine thread.
-    Call once after the RPC client is ready.
-    """
+    """Launch the command engine thread; call once after the RPC client is ready."""
     global _engine_thread
     if _engine_thread is not None and _engine_thread.is_alive():
         return

@@ -1,18 +1,4 @@
-"""
-pidog_personality_engine.py
-Background thread that scans AI response text for personality triggers
-and fires matching RPC actions in fire-and-forget daemon threads.
-
-Integration (ONE line in pidog_voice_audio.py, inside _send_audio_to_stt):
-
-    from pidog_personality_engine import personality_queue
-    personality_queue.put(full_response)
-
-That is the only modification to the voice module.
-
-Matching uses word-boundary regex so "hi" triggers on "Hi there!"
-but NOT on "things" or "this".
-"""
+"""Scan AI response text for personality triggers and fire matching RPC actions."""
 
 import queue
 import re
@@ -22,6 +8,9 @@ import sys
 
 from pidog_actions_dictionary import (
     PERSONALITY_ACTIONS,
+)
+
+from config import (
     COOLDOWN_SECONDS,
     MAX_ACTIONS_PER_MESSAGE,
     ENABLED,
@@ -42,11 +31,10 @@ _shutdown = threading.Event()
 def _fire_rpc(rpc_client, method_name, args):
     """Fire a single RPC call in a daemon thread. Never raises."""
     def _worker():
-        # Truthiness guard only - keep the early-out for a missing proxy.
+        # Skip if proxy missing.
         if not rpc_client:
             return
-        # Route through the locked helper so we serialize with the audio
-        # worker on the shared ServerProxy. Never raises.
+        # Serialize via locked RPC helper; never raises.
         try:
             _rpc_call_with_timeout(method_name, *args)
         except Exception as e:
@@ -73,12 +61,7 @@ def _check_cooldown(method_name):
 
 
 def _scan_text(text, rpc_client):
-    """
-    Scan text for triggers using word-boundary regex matching.
-
-    "hi" matches "Hi there!" and "I said hi" but NOT "things" or "this".
-    Multi-word phrases like "let's go" also use word boundaries.
-    """
+    """Match triggers in text using word-boundary regex."""
     if not ENABLED:
         return
     if not text or not isinstance(text, str):
@@ -119,10 +102,7 @@ def _engine_loop(rpc_client):
 
 
 def start_personality_engine(rpc_client):
-    """
-    Launch the personality engine thread.
-    Call once after the RPC client is ready.
-    """
+    """Launch the personality engine thread once RPC client is ready."""
     global _engine_thread
     if _engine_thread is not None and _engine_thread.is_alive():
         return

@@ -7,12 +7,9 @@ Central action registry for PiDog. Two logical sections:
                          The robot NEVER leaves its sitting position.
                          After each action the engine returns the dog to sit.
 
-  MOVEMENT_ACTIONS     - Locomotion (trot, recall, etc.).
-                         Reserved for a future module that filters the
-                         USER's STT (text sent TO OpenWebUI).
-                         NOT wired to the personality engine.
+  MOVEMENT_ACTIONS     - Locomotion (trot, recall, etc.); consumed by pidog_command_engine (USER's STT).
 
-Matching rules (applied by pidog_personality_engine):
+Matching rules (applied by pidog_personality_engine and pidog_command_engine):
   - Case-insensitive substring scan.
   - "Yes" (sentence start) and "yes" (mid-sentence) both match "yes".
   - First match wins per message (MAX_ACTIONS_PER_MESSAGE).
@@ -126,13 +123,7 @@ PERSONALITY_ACTIONS = {
     "calm mode":          ("rgb_strip_set_mode", ["breathe", "blue"]),
 }
 
-# ──────────────────────────────────────────────────────────────────
-#  SECTION 2: MOVEMENT ACTIONS  (locomotion)
-#  Filtered from: USER's STT (text sent TO OpenWebUI)
-#  Status:       RESERVED for future module. NOT wired to
-#                pidog_personality_engine. Do not add these
-#                to PERSONALITY_ACTIONS.
-# ──────────────────────────────────────────────────────────────────
+# SECTION 2: MOVEMENT ACTIONS (locomotion) — do not add to PERSONALITY_ACTIONS
 MOVEMENT_ACTIONS = {
     "walk":               ("trot", []),
     "let's go":           ("trot", []),
@@ -140,11 +131,3 @@ MOVEMENT_ACTIONS = {
     "come here":          ("recall", []),
     "come":               ("recall", []),
 }
-
-# ──────────────────────────────────────────────────────────────────
-#  TUNING KNOBS
-# ──────────────────────────────────────────────────────────────────
-COOLDOWN_SECONDS = 2.0            # min gap between same-action firings
-MAX_ACTIONS_PER_MESSAGE = 1       # only fire the first match per text blob
-ENABLED = True                    # master on/off switch
-RETURN_TO_SIT_AFTER_ACTION = True # engine fires action('sit') after each personality action

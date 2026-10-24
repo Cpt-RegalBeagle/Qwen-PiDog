@@ -4,6 +4,7 @@ import os
 import time
 import sys
 import threading
+import config
 
 rpc_client = None
 # Serializes ALL access to the single shared ServerProxy (ServerProxy is NOT
@@ -21,17 +22,9 @@ _TRANSIENT_ERRORS = (
 
 
 class _TimeoutTransport(xmlrpc_client.Transport):
-    """Transport with a hard 20s socket timeout (H1).
-
-    A stuck single-threaded server handler must never be able to block the
-    calling thread forever in recv() - a blocked-but-alive thread is
-    invisible to the watchdog. On timeout the call raises TimeoutError,
-    which _classify() maps to ConnectionError (fail-fast: no retry, because
-    a fresh client proxy cannot unstick a busy server).
-
-    `socket_timeout` optionally overrides the class-level SOCKET_TIMEOUT (20)
-    for a DEDICATED proxy (e.g. the 2.0s playback-polling proxy); passing None
-    keeps the class default so every existing caller is unchanged."""
+    """Transport with a hard 20s socket timeout (H1); a stuck handler must not block the caller forever.
+    On timeout the call raises TimeoutError, which _classify() maps to ConnectionError (fail-fast, no retry).
+    `socket_timeout` overrides the 20s default for a DEDICATED proxy; None keeps the class default."""
 
     SOCKET_TIMEOUT = 20
 
@@ -47,23 +40,14 @@ class _TimeoutTransport(xmlrpc_client.Transport):
 
 
 def _build_proxy(socket_timeout=None):
-    """Build a fresh ServerProxy WITHOUT touching the shared rpc_client global.
-
-    Lets a caller build a DEDICATED proxy (e.g. the short-timeout playback
-    polling proxy) that does not clobber the shared client. `socket_timeout`
-    optionally overrides the 20s class default; None keeps it. The shared
-    client is only (re)assigned by _create_proxy() under _RPC_LOCK."""
-    # CRITICAL FIX: Use proper localhost address for hardware RPC server
-    # The daemonized pidog_init.py runs on 127.0.0.1:8001 (NOT 127.0)
-    server_url = "http://127.0.0.1:8001"
+    """Build a fresh ServerProxy WITHOUT touching the shared rpc_client global (DEDICATED-proxy support).
+    `socket_timeout` overrides the 20s class default; None keeps it. Shared client only (re)assigned by _create_proxy() under _RPC_LOCK."""
+    server_url = f"http://127.0.0.1:{config.PORT_XMLRPC}"
     return xmlrpc_client.ServerProxy(server_url, transport=_TimeoutTransport(socket_timeout))
 
 
 def _create_proxy():
-    """Create a fresh ServerProxy and assign it to the rpc_client global.
-
-    THREADING: caller must already hold _RPC_LOCK. Assigns the global only on
-    success (the assignment is the last step)."""
+    """Create a fresh ServerProxy and assign it to the rpc_client global (caller must hold _RPC_LOCK; assigned only on success)."""
     global rpc_client
 
     new_client = _build_proxy()
@@ -72,10 +56,7 @@ def _create_proxy():
 
 
 def _setup_rpc_client():
-    """Setup XML-RPC client to communicate with pidog_init.py hardware RPC server.
-
-    Idempotent and safe to call from any thread: the proxy reference is only
-    (re)assigned while holding _RPC_LOCK."""
+    """Setup XML-RPC client to pidog_init.py hardware RPC server (idempotent, thread-safe)."""
     try:
         with _RPC_LOCK:
             if rpc_client is not None:
@@ -90,13 +71,9 @@ def _setup_rpc_client():
 
 def _invoke_locked(method_name, args):
     """Run a single RPC under _RPC_LOCK with transient-socket recovery.
-
-    On a poisoned-connection error (ResponseNotReady, BadStatusLine,
-    CannotSendRequest, ConnectionResetError) the ServerProxy is re-established
-    once and the SAME call is retried exactly once. Never swallows errors:
-    critical connection failures raise ConnectionError, anything else
-    re-raises. `args` is a tuple of positional arguments only.
-    """
+    Transient socket errors: re-establish the proxy and retry the SAME call exactly once under lock.
+    Socket timeout = fail-fast, no retry (a fresh proxy cannot unstick a busy handler).
+    `args` is a tuple of positional arguments only; never swallows errors."""
     global rpc_client
 
     if rpc_client is None:

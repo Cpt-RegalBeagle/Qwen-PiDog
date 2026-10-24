@@ -33,7 +33,11 @@ rsync_output=$(sshpass -e rsync -avz \
     --exclude='*.log' \
     --exclude='*.tmp' \
     --exclude='*.swp' \
+    --exclude='*.md' \
     --exclude='*.swo' \
+    --exclude='.aider*' \
+    --exclude='*.sh' \
+    --exclude='*.appimage' \
     --exclude='/proc/' \
     --exclude='/sys/' \
     --exclude='/dev/' \
@@ -43,6 +47,11 @@ rsync_output=$(sshpass -e rsync -avz \
     --exclude='/var/' \
     --exclude='/etc/' \
     --exclude='/home/' \
+    --exclude='/.ssh/' \
+    --exclude='/pidog/' \
+    --exclude='/.aider*/' \
+    --exclude='/robot-hat/' \
+    --exclude='/Sunfounder SDK/' \
     -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
     "./" \
     pidog@${REMOTE_IP}:${REMOTE_PATH}/ 2>&1)

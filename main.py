@@ -18,115 +18,12 @@ import config
 # Import cleanup utility
 from cleanup_hardware import cleanup_hardware
 
-# Physical button interrupts are now handled inside pidog_init.py RPC server
-# where self.dog has exclusive access to the GPIO registers
-
-
-def hardware_button_watchdog():
-    """Lightweight background thread that checks the physical USER button state directly via the OS kernel."""
-    sys.stdout.write("🔘 [HARDWARE] Active USER button watchdog listening...\n")
-    sys.stdout.flush()
-    
-    # On the PiDog, the USER button is routed directly to Broadcom GPIO 25
-    # We use a non-blocking loop to check its physical state every 200ms
-    while True:
-        try:
-            # Query the hardware pin state directly via the native Linux gpiod utility
-            # This completely bypasses the 'robot_hat' driver lock!
-            result = subprocess.run(
-                ['gpioget', 'gpiochip4', '25'], 
-                capture_output=True, 
-                text=True
-            )
-            
-            # If the tool isn't available, fall back to the older raspi-gpio interface
-            if result.returncode != 0:
-                result = subprocess.run(
-                    ['raspi-gpio', 'get', '25'], 
-                    capture_output=True, 
-                    text=True
-                )
-                is_pressed = "level=0" in result.stdout
-            else:
-                is_pressed = result.stdout.strip() == "0"
-            
-            # If the physical line is grounded (0), the button is being actively pressed!
-            if is_pressed:
-                sys.stderr.write("\n🚨 [HARDWARE PANIC] USER Button pressed physically! Triggering graceful exit...\n")
-                sys.stderr.flush()
-                
-                # Fire a native SIGTERM to our own main process thread to execute all custom cleanups!
-                os.kill(os.getpid(), signal.SIGTERM)
-                break
-                
-        except Exception:
-            pass
-            
-        time.sleep(0.2)  # 200ms polling rate keeps CPU consumption at 0.0%
-
 
 class GlobalState:
     """Central state management for the PiDog system"""
     
     def __init__(self):
-        self.running = True
         self.pidog_init_process = None
-        self.voice_profile_process = None
-        self.shutdown_callbacks = []
-        self._shutdown_in_progress = False
-        
-    def register_shutdown(self, callback):
-        """Register a function to run on clean shutdown"""
-        self.shutdown_callbacks.append(callback)
-        
-    def shutdown(self):
-        """Execute all registered shutdown callbacks and stop processes"""
-        if self._shutdown_in_progress:
-            print("⚠ Shutdown already in progress, skipping...")
-            return
-            
-        self._shutdown_in_progress = True
-        
-        try:
-            # Kill voice profile subprocess first
-            if self.voice_profile_process is not None:
-                try:
-                    self.voice_profile_process.terminate()
-                    self.voice_profile_process.wait(timeout=5)
-                    print("[Cleanup] voice_profile process terminated cleanly", file=sys.stderr)
-                except subprocess.TimeoutExpired:
-                    try:
-                        self.voice_profile_process.kill()
-                        print("[Cleanup] voice_profile process killed (force)", file=sys.stderr)
-                    except Exception as e:
-                        print(f"[Cleanup] Failed to kill voice_profile: {e}", file=sys.stderr)
-                finally:
-                    self.voice_profile_process = None
-            
-            # Kill pidog_init subprocess second
-            if self.pidog_init_process is not None:
-                try:
-                    self.pidog_init_process.terminate()
-                    self.pidog_init_process.wait(timeout=5)
-                    print("[Cleanup] pidog_init process terminated cleanly", file=sys.stderr)
-                except subprocess.TimeoutExpired:
-                    try:
-                        self.pidog_init_process.kill()
-                        print("[Cleanup] pidog_init process killed (force)", file=sys.stderr)
-                    except Exception as e:
-                        print(f"[Cleanup] Failed to kill pidog_init: {e}", file=sys.stderr)
-                finally:
-                    self.pidog_init_process = None
-            
-            # Run shutdown callbacks
-            for callback in reversed(self.shutdown_callbacks):
-                try:
-                    callback()
-                except Exception as e:
-                    pass
-                    
-        finally:
-            self._shutdown_in_progress = False
 
 
 state = GlobalState()
@@ -136,8 +33,8 @@ def signal_handler(signum, frame):
     """Handle Ctrl+C and other signals gracefully - ONLY cleanup on critical errors"""
     print("\n\n⚠ Interrupt signal received. Shutting down...")
     
-    # CRITICAL FIX: Just exit immediately - cleanup_hardware.py will kill all python processes
-    sys.exit(130)
+    # Run the same hardware cleanup as the normal shutdown path
+    cleanup_and_exit(130)
 
 
 def setup_signal_handlers():
@@ -151,17 +48,13 @@ def set_network_mode(network_mode: str):
     if network_mode == 'local':
         print("\n🌐 Network Mode: LOCAL (Direct Wi-Fi)")
         config.SERVER_IP = "192.168.0.163"
-        config.NETWORK_MODE = 'local'
     elif network_mode == 'tunnel':
         print("\n🔌 Network Mode: TUNNEL (Cloudflare Proxy)")
         config.SERVER_IP = "ai.meigs.co.uk"
-        config.NETWORK_MODE = 'tunnel'
 
 
-def background_module_watchdog(voice_proc, tracking_proc=None):
-    """Watches active background AI modules. If any module drops dead, 
-
-    it forces main.py to handle a clean hardware safety shutdown."""
+def background_module_watchdog(voice_proc):
+    """Watch background AI modules; run central hardware shutdown if one dies."""
     sys.stdout.write("📋 [WATCHDOG] Active background module supervision initialized...\n")
     sys.stdout.flush()
     
@@ -172,15 +65,9 @@ def background_module_watchdog(voice_proc, tracking_proc=None):
             sys.stderr.write(f"\n💥 [WATCHDOG ALERT] pidog_voice_conversation.py dropped dead with exit code {exit_code}!\n")
             break
             
-        # 2. Check the Head Tracking Module state (when you add it later)
-        if tracking_proc and tracking_proc.poll() is not None:
-            exit_code = tracking_proc.returncode
-            sys.stderr.write(f"\n💥 [WATCHDOG ALERT] head_tracking.py dropped dead with exit code {exit_code}!\n")
-            break
-            
-        time.sleep(0.2)  # Check every 200ms drawing 0.0% CPU overhead
+        time.sleep(0.2)  # 200ms poll
     
-    # Execution only reaches here if a child dropped! Trigger your central cleanup
+    # Reached only when a child died; run central cleanup
     sys.stderr.write("🔌 Watchdog initiating central hardware recovery teardown...\n")
     cleanup_and_exit(1)
     sys.exit(1)
@@ -194,12 +81,15 @@ def run_voice_profile():
         
         voice_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pidog_voice_conversation.py')
         
-        # Launch your voice script as an active background handle (NO .wait() call!)
+        # Launch voice script as background process
+        env = os.environ.copy()
+        env["SERVER_IP"] = config.SERVER_IP  # read current value at launch, not import-time copy
         voice_process = subprocess.Popen(
             [sys.executable, voice_script],
             stdout=None,   # Inherit parent's stdout (terminal) - SEE OUTPUT!
             stderr=None,   # Inherit parent's stderr (terminal) - SEE OUTPUT!
             cwd=os.path.dirname(os.path.abspath(__file__)),
+            env=env,
             preexec_fn=os.setsid     # Create new process group for clean kill
         )
         
@@ -208,7 +98,7 @@ def run_voice_profile():
         # Spin up the background watchdog thread, handing it the live process pointer
         monitor_thread = threading.Thread(
             target=background_module_watchdog, 
-            args=(voice_process, None),  # Pass your tracking_process handle here later!
+            args=(voice_process,),  # The watchdog thread supervises the voice module through this handle
             daemon=True
         )
         monitor_thread.start()
@@ -227,7 +117,7 @@ def perform_startup_movements():
     """Perform the startup movement sequence: Stretch, Sit, Wag Tail, Bark via local RPC."""
     import xmlrpc.client as xmlrpc_client
     
-    rpc_url = "http://localhost:8001"
+    rpc_url = f"http://localhost:{config.PORT_XMLRPC}"
     rpc_client = xmlrpc_client.ServerProxy(rpc_url)
     
     print("\n🐕 Performing startup movements...", file=sys.stderr)
@@ -294,19 +184,16 @@ def cleanup_and_exit(return_code: int):
     """Unified cleanup function that runs before exit"""
     print("\n🛑 Ensuring hardware cleanup...")
     
-    # CRITICAL FIX: Call cleanup_hardware directly - it has os._exit() at end
+    # cleanup_hardware() ends with os._exit() and never returns
     try:
-        from cleanup_hardware import cleanup_hardware
-        
-        # This will call os._exit() and terminate everything cleanly
+        # This call terminates the whole process via os._exit()
         cleanup_hardware()
         
     except Exception as e:
         print(f"❌ Critical error during hardware cleanup: {e}", file=sys.stderr)
     
-    # CRITICAL FIX: Always exit immediately - never fall through to more code
-    import sys
-    sys.exit(return_code)  # Changed from os._exit() to sys.exit()
+    # Always terminate here - never fall through to more code
+    sys.exit(return_code)
 
 
 def main():
@@ -333,10 +220,6 @@ Examples:
         sys.exit(1)
 
     setup_signal_handlers()
-
-    # CRITICAL FIX: Start hardware button watchdog thread for headless shutdown
-    button_thread = threading.Thread(target=hardware_button_watchdog, daemon=True)
-    button_thread.start()
 
     network_mode = 'local' if args.local else ('tunnel' if args.tunnel else None)
     if network_mode:
@@ -383,7 +266,7 @@ Examples:
         sock.settimeout(5)
 
         try:
-            result = sock.connect_ex(('localhost', 8001))
+            result = sock.connect_ex(('localhost', config.PORT_XMLRPC))
             if result == 0:
                 print(f"  ✅ Port 8001 is open and accepting connections", file=sys.stderr)
             else:
@@ -395,13 +278,13 @@ Examples:
         finally:
             sock.close()
 
-                # CRITICAL FIX: Pre-heat fast conversation model via llama-server router API
+        # Pre-heat fast conversation model via llama-server router API
         print(f"  🔥 Pre-heating lightweight model '{config.TARGET_MODEL}' for instant response...", file=sys.stderr)
 
         # Pulls network configuration and the active model target from global config
         model_warmed = load_llama_model(
             server_ip=config.SERVER_IP,
-            port=config.PORT_OLLAMA,
+            port=config.PORT_LLAMA,
             model_name=config.TARGET_MODEL
         )
 
@@ -427,18 +310,12 @@ Examples:
             print("  🎤 Voice assistant ready. Press Ctrl+C to exit.\n")
 
             # Main loop to keep script alive until Ctrl+C
-            while state.running:
+            while True:
                 time.sleep(1)
 
         else:
             print("\n❌ Failed to launch voice profile")
             cleanup_and_exit(1)
-
-    # Hardware RST button handles panic shutdown via GPIO interrupt
-    # Ctrl+C still works but is secondary to hardware panic
-    except KeyboardInterrupt:
-        print("\n⚠ Interrupted by user (Ctrl+C)")
-        return cleanup_and_exit(130)
 
     except Exception as e:
         print(f"\n❌ System error: {e}")
@@ -450,10 +327,6 @@ Examples:
 
 import requests
 
-# Ready states reported by the llama.cpp router for a model that can serve requests
-ROUTER_READY_STATES = ("loaded", "sleeping")
-# States where a load is already underway and only needs to be waited on
-ROUTER_IN_PROGRESS_STATES = ("loading", "downloading", "downloaded")
 
 
 def _router_model_state(entry):
@@ -467,7 +340,7 @@ def _router_model_state(entry):
     return status, False, None
 
 
-def load_llama_model(server_ip, port, model_name, timeout=120.0, poll_interval=2.0):
+def load_llama_model(server_ip, port, model_name, timeout=config.LLM_LOAD_TIMEOUT, poll_interval=config.LLM_LOAD_POLL_INTERVAL):
     """
     Triggers llama-server Router Mode to hot-swap or preload a specific model,
     then polls /v1/models until the model's status reports 'loaded'.
@@ -509,12 +382,12 @@ def load_llama_model(server_ip, port, model_name, timeout=120.0, poll_interval=2
         state, failed, exit_code = _router_model_state(entry)
 
         # 2) Fast path: already serving
-        if state in ROUTER_READY_STATES:
+        if state in config.ROUTER_READY_STATES:
             print(f"Model already loaded: {model_name}")
             return True
 
         # 3) Trigger the load (skip if one is already in progress)
-        if state not in ROUTER_IN_PROGRESS_STATES:
+        if state not in config.ROUTER_IN_PROGRESS_STATES:
             response = requests.post(
                 f"{base_url}/models/load",
                 json={"model": model_name},
@@ -541,7 +414,7 @@ def load_llama_model(server_ip, port, model_name, timeout=120.0, poll_interval=2
                 continue
 
             state, failed, exit_code = _router_model_state(entry)
-            if state in ROUTER_READY_STATES:
+            if state in config.ROUTER_READY_STATES:
                 print(f"Successfully loaded model: {model_name}")
                 return True
             if failed or (exit_code is not None and exit_code != 0):

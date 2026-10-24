@@ -3,7 +3,6 @@ import time
 import threading
 import shutil
 import struct
-import json
 import queue
 import requests
 import sys
@@ -25,17 +24,9 @@ from pidog_command_engine import command_queue
 is_running = True
 shutdown_requested = False
 is_speaking = False
-# SOLE cross-thread speaking gate (single-writer: only _speak_text writes).
-# is_speaking_deadline is a monotonic-seconds bound; the gate is EXPIRED when
-# time.monotonic() >= is_speaking_deadline. The VAD loop only READS both.
+# Speaking gate: written only by _speak_text; VAD loop reads only.
 is_speaking_deadline = 0.0
 audio_worker_thread = None
-
-# Llama router load contract (mirrors main.py load_llama_model)
-LLM_LOAD_TIMEOUT: float = 120.0
-LLM_LOAD_POLL_INTERVAL: float = 2.0
-ROUTER_READY_STATES = ("loaded", "sleeping")
-ROUTER_IN_PROGRESS_STATES = ("loading", "downloading", "downloaded")
 
 
 def _init_session_file(audio_file, session_file):
@@ -105,10 +96,7 @@ def _start_audio_worker():
             print("  [AUDIO] Dynamic VAD engine initialized. Idling for voice activity...", file=sys.stderr, flush=True)
 
             while is_running and not shutdown_requested:
-                # Speaking gate: while TTS playback is active (and within its
-                # finite deadline) skip VAD. READ-ONLY here (never written); a
-                # gate past its deadline is treated as expired without any write,
-                # preserving the single-writer invariant.
+                # Skip VAD while gate active and unexpired.
                 if is_speaking and time.monotonic() < is_speaking_deadline:
                     time.sleep(0.5); continue
 
@@ -171,20 +159,9 @@ def _router_model_state(entry):
     return status, False, None
 
 
-def _ensure_llama_ready(model: str, timeout: float = LLM_LOAD_TIMEOUT, poll_interval: float = LLM_LOAD_POLL_INTERVAL) -> bool:
-    """
-    Ensures the voice model is resident in the llama.cpp router before the
-    chat POST. Triggers the router's POST /models/load when the model is
-    evicted, then polls GET /v1/models until the model reports a ready state.
-
-    The router's /models/load returns HTTP 200 as soon as the load is
-    *accepted*, not when it has *completed* - success is only confirmed by
-    polling. Failure is detected via status.failed / exit_code != 0 (child
-    process died, e.g. bad GGUF path), an 'incomplete' model file, an
-    unreachable router, or a timeout.
-    Returns a plain bool and never raises.
-    """
-    base_url = f"http://{config.SERVER_IP}:{config.PORT_OLLAMA}"
+def _ensure_llama_ready(model: str, timeout: float = config.LLM_LOAD_TIMEOUT, poll_interval: float = config.LLM_LOAD_POLL_INTERVAL) -> bool:
+    """Pre-flight plus router load/poll until ready; returns bool, never raises."""
+    base_url = f"http://{config.SERVER_IP}:{config.PORT_LLAMA}"
 
     def fetch_entry():
         """Return (entry, error): the model's /v1/models entry (or None) and an error string."""
@@ -214,12 +191,12 @@ def _ensure_llama_ready(model: str, timeout: float = LLM_LOAD_TIMEOUT, poll_inte
         state, failed, exit_code = _router_model_state(entry)
 
         # 2) Fast path: already resident
-        if state in ROUTER_READY_STATES:
+        if state in config.ROUTER_READY_STATES:
             print(f"  [LLM] Model already resident: {model}", file=sys.stderr, flush=True)
             return True
 
         # 3) Trigger the load (skip if one is already in progress)
-        if state not in ROUTER_IN_PROGRESS_STATES:
+        if state not in config.ROUTER_IN_PROGRESS_STATES:
             try:
                 response = requests.post(
                     f"{base_url}/models/load",
@@ -254,7 +231,7 @@ def _ensure_llama_ready(model: str, timeout: float = LLM_LOAD_TIMEOUT, poll_inte
                 continue
 
             state, failed, exit_code = _router_model_state(entry)
-            if state in ROUTER_READY_STATES:
+            if state in config.ROUTER_READY_STATES:
                 print(f"  [LLM] Model resident: {model}", file=sys.stderr, flush=True)
                 return True
             if failed or (exit_code is not None and exit_code != 0):
@@ -279,7 +256,7 @@ def _get_llm_response(text: str):
     First ensures the voice model is resident in the llama.cpp router
     (hot-swap via router /models/load + /v1/models polling), then POSTs
     the STT transcription to the Llama OpenAI-compatible endpoint
-    (config.OLLAMA_STREAM_URL, non-streaming) and returns the assistant
+    (config.LLAMA_STREAM_URL, non-streaming) and returns the assistant
     reply string, or None on any failure. Must NEVER raise.
     """
     if not _ensure_llama_ready(config.TARGET_MODEL):
@@ -296,9 +273,9 @@ def _get_llm_response(text: str):
         }
 
         response = requests.post(
-            config.OLLAMA_STREAM_URL,
+            config.LLAMA_STREAM_URL,
             json=payload,
-            timeout=(10, config.OLLAMA_TIMEOUT)
+            timeout=(10, config.LLAMA_TIMEOUT)
         )
 
         if response.status_code == 500 or response.status_code == 503:
@@ -323,7 +300,7 @@ def _get_llm_response(text: str):
 
 
 def _send_audio_to_stt(audio_file: str):
-    """Send audio file to OpenWebUI for STT processing - INDEPENDENT OF FACE TRACKING"""
+    """Send audio file to OpenWebUI for STT processing."""
 
     # OpenWebUI returns the STT transcription only; the robot then bridges it to
     # the Llama LLM via _get_llm_response before speaking.
@@ -391,12 +368,7 @@ def _send_audio_to_stt(audio_file: str):
 
 
 def _wav_duration_seconds(wav_bytes_or_path):
-    """Return the EXACT duration (seconds) of a WAV.
-
-    Accepts raw WAV bytes (preferred - the TTS bytes are already in memory) or a
-    file path. Uses stdlib wave + io.BytesIO. On ANY failure returns
-    config.PLAYBACK_FALLBACK_DURATION (fail-closed: a generous FINITE bound,
-    never zero, so the gate always carries a finite deadline)."""
+    """Exact WAV duration; fail-closed to config.PLAYBACK_FALLBACK_DURATION on parse failure."""
     try:
         if isinstance(wav_bytes_or_path, bytes):
             with wave.open(io.BytesIO(wav_bytes_or_path), 'rb') as w:
@@ -425,14 +397,7 @@ def _best_effort_music_stop():
 
 
 def _wait_playback_end(duration):
-    """Block (on the EXISTING worker thread) until the tracked playback ends.
-
-    Polls is_music_playing() over a DEDICATED 2.0s-timeout proxy (built via
-    _build_proxy) - NOT the shared 20s proxy - so a stuck poll can never blow
-    the watchdog bound. Fail-closed: an RPC/timeout error is treated as 'still
-    playing'. If the watchdog deadline (duration + PLAYBACK_WATCHDOG_MARGIN)
-    fires, a best-effort music_stop() is sent and we return. No new thread/lock -
-    this runs on the calling worker thread."""
+    """Poll is_music_playing on short-timeout proxy; watchdog force-stop; fail-closed."""
     start = time.monotonic()
     deadline = start + duration + config.PLAYBACK_WATCHDOG_MARGIN
 
@@ -473,12 +438,7 @@ def _release_speak_gate():
 
 
 def _speak_text(text: str):
-    """Convert text to speech using Kokoro TTS.
-
-    Straight-line, single-writer, fail-closed. The speaking gate
-    (is_speaking / is_speaking_deadline) is armed BEFORE any audio can start and
-    ALWAYS carries a finite deadline; it is released on EVERY exit path via the
-    finally funnel (the VAD-loop deadline check is the second bound)."""
+    """Kokoro TTS; gate armed pre-playback, released on every exit path."""
 
     global is_speaking, is_speaking_deadline
 
@@ -567,9 +527,7 @@ def _speak_text(text: str):
 
 def get_wav_volume(file_path):
     """Calculate Root-Mean-Square amplitude of a 16-bit WAV file"""
-    import struct
     import math
-    import os
 
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
         return 0

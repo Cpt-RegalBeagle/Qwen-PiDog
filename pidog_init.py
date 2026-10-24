@@ -1,18 +1,10 @@
 import sys
 import os
 import time
-from typing import Optional
+import config
 
 # ==================== GLOBAL STATE ====================
 dog = None
-rpc_server_thread = None
-
-# ==================== SERVER-SIDE PLAYBACK LOCK ====================
-_hardware_speaking_lock = False  # Explicit application-level state lock for duplex audio
-
-# ==================== SERVER-SIDE SOUND DIRECTION TRACKING ====================
-_last_sound_direction = 0  # Background-polled azimuth angle (0-359)
-_ears_monitor_thread = None
 
 
 
@@ -39,9 +31,7 @@ def _daemonize():
         os.dup2(dev_null.fileno(), sys.stdin.fileno())
         dev_null.close()
         
-        # CRITICAL FIX: Keep stdout and stderr visible for debugging!
-        # Only redirect stdin to /dev/null - keep stderr open so debug messages appear in console
-        # This allows all print(..., flush=True) statements from ears monitor thread to appear in terminal
+        # Keep stdout/stderr visible for debugging; only stdin is redirected
         
     except Exception as e:
         print(f"❌ Daemonization failed: {e}", file=sys.stderr, flush=True)
@@ -52,14 +42,13 @@ def _run_xml_rpc_server_loop():
     """Standalone function to run the XML-RPC server loop - called by forked child"""
     global dog
     
-    # CRITICAL FIX: Properly daemonize before running RPC server
+    # Daemonize before running RPC server
     _daemonize()
     
     print("📡 [RPC] Starting RPC server event loop in daemonized context...", flush=True)
     print(f"  [RPC_SERVER] PID: {os.getpid()} starting", file=sys.stderr, flush=True)
     
-    # CRITICAL FIX: CHILD PROCESS MUST INITIALIZE HARDWARE ITSELF!
-    # Parent's dog instance is not accessible in child process after fork
+    # Child must init hardware itself; parent's dog is not accessible post-fork
     try:
         from pidog.pidog import Pidog
         
@@ -94,26 +83,19 @@ def _run_xml_rpc_server_loop():
             PidogRPCHandler = MinimalRPCHandler
                     
         if rpc_handler_available:
-            rpc_server = SimpleXMLRPCServer(('0.0.0.0', 8001), logRequests=False)
+            rpc_server = SimpleXMLRPCServer(('0.0.0.0', config.PORT_XMLRPC), logRequests=False)
             
-            # CRITICAL STRUCTURAL FIX: Instantiate once so network and thread share memory space
+            # Instantiate once so network and thread share memory
             active_handler = PidogRPCHandler(dog)
             rpc_server.register_instance(active_handler)
             print("  📡 [RPC] Registered primary PidogRPCHandler instance to socket matrix.", file=sys.stderr, flush=True)
         else:
             # Create minimal server with fallback handler
-            rpc_server = SimpleXMLRPCServer(('0.0.0.0', 8001), logRequests=False)
+            rpc_server = SimpleXMLRPCServer(('0.0.0.0', config.PORT_XMLRPC), logRequests=False)
             rpc_server.register_instance(MinimalRPCHandler())
         
-        # CRITICAL RE-ALIGNMENT: Trigger the ears monitor thread using the active registered instance handle
-        if rpc_handler_available:
-            try:
-                active_handler.start_ears_monitor()
-                print("  ✅ Ears monitor thread successfully attached to active network instance!", file=sys.stderr, flush=True)
-            except Exception as e:
-                print(f"  ⚠️  Could not start ears monitor on active handler: {e}", file=sys.stderr, flush=True)
         
-        # CRITICAL: Use serve_forever() instead of handle_request() loop for proper daemon behavior
+        # serve_forever() for proper daemon behavior
         rpc_server.serve_forever()
         
     except Exception as e:
@@ -124,45 +106,44 @@ def _run_xml_rpc_server_loop():
 
 
 def run():
-    """Main execution - follows exact pattern specified"""
-    global dog, rpc_server_thread
+    """Parent: fork RPC daemon, run hardware self-tests, exit"""
     
-    # STEP 1: Parent does NOT initialize hardware - just waits for child to fork and initialize
+    # Parent does NOT init hardware - waits for child to fork and initialize
     print("🤖 [1/4] Waiting for child process to initialize hardware...", flush=True)
     print(f"  [PARENT] PID: {os.getpid()} starting", file=sys.stderr, flush=True)
     
-    # Parent does nothing here - just waits for child to fork and initialize
     print("📡 [2/4] Launching XML-RPC Server as orphaned daemon process...", flush=True)
 
-    # CRITICAL FIX: Use double-fork daemonization pattern - NOT threading!
+    # Double-fork daemonization - NOT threading
     try:
         pid = os.fork()
         if pid > 0:
-            # FIRST PARENT PROCESS - Hardware already initialized above, just wait for RPC server and run tests
+            # PARENT: wait for RPC port, verify child hardware, run self-tests
             import socket
             
             max_retries = 5
             retry_delay = 0.5
             
             for attempt in range(max_retries):
+                sock = None
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(2)
                     
-                    result = sock.connect_ex(('localhost', 8001))
+                    result = sock.connect_ex(('localhost', config.PORT_XMLRPC))
                     if result == 0:
                         print(f"  ✅ Port 8001 is open and accepting connections (attempt {attempt + 1})", flush=True)
-                        sock.close()
                         break
-                    else:
+                except Exception:
+                    pass
+                finally:
+                    if sock is not None:
                         sock.close()
-                except Exception as e:
-                    sock.close()
                 
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
             
-            # PARENT PROCESS - Wait for child hardware to initialize BEFORE running tests
+            # Wait for child hardware ready before tests
             max_wait_attempts = 20
             wait_delay = 1.0
             
@@ -170,7 +151,7 @@ def run():
                 try:
                     # Check if child is still initializing by trying a simple RPC call
                     import xmlrpc.client as xmlrpc_client
-                    rpc_client = xmlrpc_client.ServerProxy(f"http://localhost:8001")
+                    rpc_client = xmlrpc_client.ServerProxy(f"http://localhost:{config.PORT_XMLRPC}")
                         
                     result = rpc_client.status()
                         
@@ -184,21 +165,21 @@ def run():
                 if attempt < max_wait_attempts - 1:
                     time.sleep(wait_delay)
             
-            # If we exit the loop without breaking, child didn't initialize properly
+            # If loop ends without breaking, child didn't initialize
             if attempt >= max_wait_attempts - 1:
                 print(f"  ❌ Child hardware initialization timeout after {max_wait_attempts * wait_delay}s", file=sys.stderr, flush=True)
                 sys.exit(1)
 
-            # PARENT PROCESS - Run loopback verification tests AFTER port is verified AND hardware initialized
+            # Run loopback verification tests (port + hardware ready)
             test_results = []
             
             try:
-                # Setup local RPC client to test the API handlers
-                rpc_url = f"http://localhost:8001"
+                # Local RPC client for API handler tests
+                rpc_url = f"http://localhost:{config.PORT_XMLRPC}"
                 import xmlrpc.client as xmlrpc_client
                 rpc_client = xmlrpc_client.ServerProxy(rpc_url)
                 
-                # Test sit action via RPC (NO SPEED PARAMETER)
+                # Test sit action via RPC
                 print("  Testing sit action via RPC...", flush=True)
                 try:
                     result = rpc_client.action('sit')
@@ -207,9 +188,8 @@ def run():
                         test_results.append(("Sit Action", True))
                         print(f"  ✅ Sit action started", flush=True)
                         
-                        # CRITICAL FIX: Parent process cannot wait on child's actions!
-                        # Remove wait_all_done() - it waits on wrong dog instance
-                        time.sleep(1.0)  # Hardware settle pause
+                        # Parent cannot wait on child actions - settle pause
+                        time.sleep(1.0)
                         
                         print(f"  ✅ Sit action completed via RPC", flush=True)
                     else:
@@ -219,19 +199,10 @@ def run():
                     print(f"  ❌ Sit action RPC error: {e}", file=sys.stderr, flush=True)
                     test_results.append(("Sit Action", False))
 
-                # Hardware settle pause - give I2C/I2S buses time to flush buffers
+                # Settle: flush I2C/I2S buffers
                 time.sleep(1.0)
 
-                # CRITICAL FIX: Set RGB to safe state BEFORE returning - OFFICIAL SUNFOUNDER MODES
-                if dog is not None and hasattr(dog, 'rgb_strip'):
-                    try:
-                        # Force RGB to breath black (not solid mode) - DO THIS EARLIER
-                        dog.rgb_strip.set_mode('breath', 'black')
-                        print("  ✅ RGB strip reset to breath black", file=sys.stderr, flush=True)
-                    except Exception as e:
-                        print(f"  ⚠️  Could not reset RGB strip: {e}", file=sys.stderr, flush=True)
-
-                # Test tail wag via RPC (use dedicated endpoint for optimized animation)
+                # Test tail wag via RPC
                 print("  Testing tail wag via RPC...", flush=True)
                 try:
                     result = rpc_client.wag_tail()
@@ -242,8 +213,8 @@ def run():
                         time.sleep(6.0)
                         
                         rpc_client.tail_stop()
-                        # CRITICAL FIX: Parent process cannot wait on child's actions!
-                        time.sleep(1.0)  # Hardware settle pause
+                        # Parent cannot wait on child actions - settle pause
+                        time.sleep(1.0)
                         
                         print(f"  ✅ Tail wag completed via RPC", flush=True)
                     else:
@@ -252,15 +223,15 @@ def run():
                 except Exception as e:
                     try:
                         rpc_client.tail_stop()
-                    except:
+                    except Exception:
                         pass
                     print(f"  ❌ Tail wag RPC error: {e}", file=sys.stderr, flush=True)
                     test_results.append(("Tail Wag", False))
 
-                # Hardware settle pause - give I2C/I2S buses time to flush buffers
+                # Settle: flush I2C/I2S buffers
                 time.sleep(1.0)
 
-                # Test head shake via RPC (use dedicated endpoint for optimized animation)
+                # Test head shake via RPC
                 print("  Testing head shake via RPC...", flush=True)
 
                 try:
@@ -272,8 +243,8 @@ def run():
                         time.sleep(3.0)
                         
                         rpc_client.head_stop()
-                        # CRITICAL FIX: Parent process cannot wait on child's actions!
-                        time.sleep(1.0)  # Hardware settle pause
+                        # Parent cannot wait on child actions - settle pause
+                        time.sleep(1.0)
                         
                         print(f"  ✅ Head shake completed via RPC", flush=True)
                     else:
@@ -283,13 +254,13 @@ def run():
                     print(f"  ❌ Head shake RPC error: {e}", file=sys.stderr, flush=True)
                     test_results.append(("Head Shake", False))
 
-                # Hardware settle pause - give I2C/I2S buses time to flush buffers
+                # Settle: flush I2C/I2S buffers
                 time.sleep(1.0)
 
-                # Test audio input via RPC (calls arecord on server side)
+                # Test audio input via RPC (arecord on server side)
                 print("  Testing audio input via RPC...", flush=True)
                 try:
-                    result = rpc_client.audio_record(1, '/tmp/pidog_test_audio.wav')
+                    result = rpc_client.audio_record(1, config.SELF_TEST_AUDIO_PATH)
                     if result and result.get('status') == 'success':
                         test_results.append(("Audio Input", True))
                         print(f"  ✅ Audio recording completed: {result}", flush=True)
@@ -300,7 +271,7 @@ def run():
                     print(f"  ❌ Audio input RPC error: {e}", file=sys.stderr, flush=True)
                     test_results.append(("Audio Input", False))
 
-                # Hardware settle pause - give PipeWire audio channels time to flush buffers
+                # Settle: flush PipeWire buffers
                 time.sleep(1.0)
 
                 # Test IMU via RPC
@@ -319,10 +290,10 @@ def run():
                     print(f"  ❌ IMU RPC error: {e}", file=sys.stderr, flush=True)
                     test_results.append(("IMU", False))
 
-                # Hardware settle pause - give I2C buses time to flush buffers
+                # Settle: flush I2C buffers
                 time.sleep(1.0)
 
-                # Test camera photo action via RPC - WITH TIMEOUT AND ERROR HANDLING
+                # Test camera capture via RPC
                 print("  Testing camera capture via RPC...", flush=True)
                 try:
                     result = rpc_client.camera_capture()
@@ -337,7 +308,7 @@ def run():
                     print(f"  ⚠️  Camera RPC error (optional): {e}", file=sys.stderr, flush=True)
                     test_results.append(("Camera Capture", False))
 
-                # Hardware settle pause - give camera I2C bus time to flush buffers
+                # Settle: flush camera I2C bus
                 time.sleep(1.0)
                 
             except Exception as e:
@@ -354,30 +325,23 @@ def run():
                 if not passed and name != "Camera Capture":
                     all_passed = False
             
-            # STEP 4: Clean handoff back to main.py - RETURN TO MAIN.PY
+            # Hand off to main.py (exit; RPC daemon survives)
             print("🚀 [4/4] Handing control back to main.py (RPC remains active)...", flush=True)
 
-            # CRITICAL FIX: Exit the process cleanly after tests
-            # The double-forked daemon will survive this exit as an orphaned process
+            # Exit cleanly; double-forked RPC daemon survives as orphan
             print("  🚪 pidog_init.py exiting - RPC server daemon is orphaned and running", file=sys.stderr, flush=True)
 
             sys.exit(0 if all_passed else 1)
             
         else:
-            # CHILD PROCESS (pid == 0) - Initialize hardware and run RPC server in _run_xml_rpc_server_loop()
+            # CHILD (pid == 0): init hardware + RPC server
             print("  [CHILD] Forked successfully (PID: {}) - initializing hardware and RPC server...".format(os.getpid()), file=sys.stderr, flush=True)
             
-            # CRITICAL FIX: Call the standalone function that handles ALL child process initialization
-            # This initializes dog = Pidog(), creates RPC server on port 8001, and runs serve_forever()
+            # Child entry: Pidog init, RPC server on 8001, serve_forever()
             _run_xml_rpc_server_loop()
     except OSError as e:
         print(f"❌ Failed to fork daemon process: {e}", file=sys.stderr, flush=True)
         sys.exit(1)
-
-
-def init_all_modules():
-    """Wrapper function for backward compatibility with main.py"""
-    return run()
 
 
 # ==================== MAIN EXECUTION (STANDALONE) ====================

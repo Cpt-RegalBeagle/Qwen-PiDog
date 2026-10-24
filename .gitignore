@@ -39,4 +39,6 @@ claude.md
 .aider*
 CONVENTIONS.md
 Sunfounder SDK/
-
+*.appimage
+pidog/
+robot-hat/
