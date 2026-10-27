@@ -5,6 +5,9 @@ two machines, one robot kit: the Pi runs the robot, a second Linux box
 runs the LLM / TTS / STT services, and nothing leaves your network.
 
 ## Architecture
+![PiDog AI Architecture](Pidog_archutecture.jpg)
+
+
 
     Pi robot                          AI server
     python3 main.py                  llama-server  :11434  (LLM, model of your choice)
