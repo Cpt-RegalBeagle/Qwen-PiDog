@@ -5,7 +5,7 @@ two machines, one robot kit: the Pi runs the robot, a second Linux box
 runs the LLM / TTS / STT services, and nothing leaves your network.
 
 ## Architecture
-![PiDog AI Architecture](Pidog_archutecture.jpg)
+![PiDog AI Architecture](Pidog_Architecture.jpg)
 
 
 
