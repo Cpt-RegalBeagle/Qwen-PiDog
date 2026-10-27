@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+#==============================================================================
+# AI STACK - local AI engine for the PiDog voice assistant (public template)
+#==============================================================================
+# Brings up the local AI infrastructure:
+#   - llama-server (LLM inference, model of your choice)
+#   - open-webui   (STT interface)
+#   - kokoro       (TTS voice synthesis)
+#   - cf-tunnel    (optional Cloudflare tunnel, only when CF_TUNNEL_TOKEN_WEBUI is set)
+#
+# Personal overrides go in ai-stack.local.sh (gitignored), sourced at the end.
+
+set -euo pipefail
+
+# Load environment variables from the shared .env file if it exists
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "Warning: .env file not found in current directory. Using system env fields."
+fi
+
+#==============================================================================
+# 1. Ports & Paths (all overridable via env / .env)
+#==============================================================================
+PORT_LLAMA="${PORT_LLAMA:-11434}"
+PORT_KOKORO="${PORT_KOKORO:-8880}"
+PORT_WEBUI="${PORT_WEBUI:-8089}"
+# Remote podman bridge port; referenced by the robot's cleanup script
+PORT_SOCAT="${PORT_SOCAT:-8075}"
+
+# Open WebUI storage volume
+STORAGE_PATH="${STORAGE_PATH:-$HOME/open-webui-storage}"
+# Put your .gguf model files here
+MODEL_DIR="${MODEL_DIR:-$HOME/llama_models}"
+
+WEBUI_API_KEY="${WEBUI_API_KEY:-}"
+
+# LLM server image and extra flags
+LLM_IMAGE="${LLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:full-rocm}"
+# e.g. LLM_EXTRA_ARGS="--models-preset /models/models.ini --models-max 1 --parallel 1"
+LLM_EXTRA_ARGS="${LLM_EXTRA_ARGS:-}"
+
+#==============================================================================
+# 2. GPU autodetect: ROCm (/dev/kfd), NVIDIA (/dev/nvidia*), else CPU.
+#    Override with LLM_GPU_ARGS (device/group flags) and LLM_GPU_ENV (-e flags).
+#==============================================================================
+LLM_GPU_ARGS="${LLM_GPU_ARGS:-}"
+LLM_GPU_ENV="${LLM_GPU_ENV:-}"
+if [ -z "$LLM_GPU_ARGS" ]; then
+    if [ -e /dev/kfd ]; then
+        LLM_GPU_ARGS="--device /dev/kfd --device /dev/dri"
+        # Only forward HSA_OVERRIDE_GFX_VERSION if the user set it in their env
+        if [ -n "${HSA_OVERRIDE_GFX_VERSION:-}" ]; then
+            LLM_GPU_ENV="-e HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION}"
+        fi
+    elif ls /dev/nvidia* >/dev/null 2>&1; then
+        LLM_GPU_ARGS="--device /dev/nvidia0"
+    fi
+fi
+
+## Open Websocket for remote Podman commands
+systemctl --user enable --now podman.socket
+
+socat TCP-LISTEN:${PORT_SOCAT},reuseaddr,fork UNIX-CONNECT:/run/user/$(id -u)/podman/podman.sock &
+
+#==============================================================================
+# 3. Container Lifecycle Reset
+#==============================================================================
+echo "Cleaning up previous container instances..."
+podman rm -f \
+    llama-server \
+    open-webui \
+    kokoro \
+    cf-tunnel \
+    2>/dev/null || true
+
+#==============================================================================
+# 4. Llama LLM Server (GPU or CPU)
+#==============================================================================
+echo "Starting llama-server..."
+podman run -d \
+    --name llama-server \
+    --restart unless-stopped \
+    -v "$MODEL_DIR":/models:Z \
+    $LLM_GPU_ENV \
+    $LLM_GPU_ARGS \
+    --security-opt label=disable \
+    --group-add keep-groups \
+    --ipc=host \
+    --net=host \
+    "$LLM_IMAGE" \
+    --host 0.0.0.0 \
+    --port "$PORT_LLAMA" \
+    $LLM_EXTRA_ARGS
+
+#==============================================================================
+# 5. Open WebUI Container (STT Interface)
+#==============================================================================
+echo "Deploying Open WebUI..."
+podman run -d \
+    --name open-webui \
+    --restart unless-stopped \
+    -v "$STORAGE_PATH":/app/backend/data:rw \
+    -e PORT="${PORT_WEBUI}" \
+    -e ENABLE_PERSISTENT_CONFIG=True \
+    -e WEBUI_SECRET_KEY="${WEBUI_API_KEY}" \
+    -e LLAMA_BASE_URL="http://localhost:${PORT_LLAMA}" \
+    -e WEBUI_NO_UPDATE_CHECK=True \
+    -e WEBUI_ENABLE_AUTH=False \
+    -e WEBUI_ENABLE_LOCAL_FILE_UPLOAD=True \
+    --net=host \
+    --cap-add NET_ADMIN \
+    ghcr.io/open-webui/open-webui:v0.9.4
+
+#==============================================================================
+# 6. Kokoro TTS Backend (Voice Synthesis)
+#==============================================================================
+echo "Starting Kokoro TTS backend..."
+podman run -d \
+    --name kokoro \
+    --restart unless-stopped \
+    --net=host \
+    --ipc=host \
+    -e KOKORO_MODEL="onnxruntime-gpu" \
+    -e KOKORO_DEVICE="rocm" \
+    -e KOKORO_CONTEXT_LENGTH=4096 \
+    -e KOKORO_MAX_NEW_TOKENS=8192 \
+    -e KOKORO_TEMPERATURE=0.7 \
+    -e KOKORO_PORT="${PORT_KOKORO}" \
+    ghcr.io/remsky/kokoro-fastapi-cpu:latest
+
+#==============================================================================
+# 7. Optional Cloudflare Tunnel for the WebUI (only if a token is set)
+#==============================================================================
+if [ -n "${CF_TUNNEL_TOKEN_WEBUI:-}" ]; then
+    echo "Starting Cloudflare tunnel for the WebUI..."
+    TUNNEL_DNS="${CF_TUNNEL_DNS:-localhost}"
+    podman run -d \
+        --name cf-tunnel \
+        --net=host \
+        --restart always \
+        --security-opt label=disable \
+        -e TUNNEL_TOKEN="${CF_TUNNEL_TOKEN_WEBUI}" \
+        -e TUNNEL_NO_AUTOUPDATE="true" \
+        -e TUNNEL_ORIGIN_URL="http://localhost:${PORT_WEBUI}" \
+        -e TUNNEL_DNS="$TUNNEL_DNS" \
+        docker.io/cloudflare/cloudflared:latest \
+        tunnel --no-autoupdate run --protocol http2
+else
+    echo "CF_TUNNEL_TOKEN_WEBUI not set - skipping Cloudflare tunnel"
+fi
+
+#==============================================================================
+# 8. Status
+#==============================================================================
+echo ""
+echo "AI STACK ONLINE"
+echo "  LLM (llama-server):  http://localhost:${PORT_LLAMA}"
+echo "  Open WebUI (STT):    http://localhost:${PORT_WEBUI}"
+echo "  Kokoro TTS:          http://localhost:${PORT_KOKORO}"
+
+[ -f ./ai-stack.local.sh ] && source ./ai-stack.local.sh  # personal overrides (gitignored)

@@ -24,6 +24,7 @@ class GlobalState:
     
     def __init__(self):
         self.pidog_init_process = None
+        self.roommap_thread = None
 
 
 state = GlobalState()
@@ -47,13 +48,18 @@ def set_network_mode(network_mode: str):
     """Set network mode and update configuration accordingly"""
     if network_mode == 'local':
         print("\n🌐 Network Mode: LOCAL (Direct Wi-Fi)")
-        config.SERVER_IP = "192.168.0.163"
+        SERVER_IP = config.SERVER_IP
     elif network_mode == 'tunnel':
         print("\n🔌 Network Mode: TUNNEL (Cloudflare Proxy)")
-        config.SERVER_IP = "ai.meigs.co.uk"
+        SERVER_IP = config.TUNNEL_IP
 
 
-def background_module_watchdog(voice_proc):
+# Heartbeat staleness bound for the roommap daemon (beats are 0.5 s while parked
+# and per-sample during a scan; 30 s is generous over a worst-case sample cycle).
+ROOMMAP_HEARTBEAT_STALE_S = 30.0
+
+
+def background_module_watchdog(voice_proc, roommap_thread=None, roommap=None):
     """Watch background AI modules; run central hardware shutdown if one dies."""
     sys.stdout.write("📋 [WATCHDOG] Active background module supervision initialized...\n")
     sys.stdout.flush()
@@ -64,7 +70,16 @@ def background_module_watchdog(voice_proc):
             exit_code = voice_proc.returncode
             sys.stderr.write(f"\n💥 [WATCHDOG ALERT] pidog_voice_conversation.py dropped dead with exit code {exit_code}!\n")
             break
-            
+
+        # 2. Check the roommap thread state (thread liveness + fresh heartbeat)
+        if roommap_thread is not None and roommap is not None:
+            if not roommap_thread.is_alive():
+                sys.stderr.write("\n💥 [WATCHDOG ALERT] roommap thread dropped dead!\n")
+                break
+            if time.time() - roommap.last_beat > ROOMMAP_HEARTBEAT_STALE_S:
+                sys.stderr.write(f"\n💥 [WATCHDOG ALERT] roommap heartbeat stale (> {ROOMMAP_HEARTBEAT_STALE_S:.0f} s, thread wedged)!\n")
+                break
+
         time.sleep(0.2)  # 200ms poll
     
     # Reached only when a child died; run central cleanup
@@ -73,7 +88,23 @@ def background_module_watchdog(voice_proc):
     sys.exit(1)
 
 
-def run_voice_profile():
+# ==================== ROOMMAP BRIDGE ====================
+# Dedicated locked XML-RPC proxy for the roommap daemon, mirroring the
+# pidog_voice_rpc._rpc_call pattern (ServerProxy is NOT thread-safe; every
+# call is serialized on a dedicated lock).
+import xmlrpc.client as xmlrpc_client
+
+_roommap_proxy = xmlrpc_client.ServerProxy(f"http://localhost:{config.PORT_XMLRPC}")
+_roommap_proxy_lock = threading.Lock()
+
+
+def _roommap_rpc(method_name, *args):
+    """Locked RPC bridge handed to pidog_roommap.start_roommap (rpc(method, *args))."""
+    with _roommap_proxy_lock:
+        return getattr(_roommap_proxy, method_name)(*args)
+
+
+def run_voice_profile(roommap_thread=None, roommap=None):
     """Run pidog_voice_conversation.py as background subprocess with watchdog supervision"""
     
     try:
@@ -98,7 +129,7 @@ def run_voice_profile():
         # Spin up the background watchdog thread, handing it the live process pointer
         monitor_thread = threading.Thread(
             target=background_module_watchdog, 
-            args=(voice_process,),  # The watchdog thread supervises the voice module through this handle
+            args=(voice_process, roommap_thread, roommap),  # The watchdog thread supervises the voice module through this handle
             daemon=True
         )
         monitor_thread.start()
@@ -183,7 +214,14 @@ def perform_startup_movements():
 def cleanup_and_exit(return_code: int):
     """Unified cleanup function that runs before exit"""
     print("\n🛑 Ensuring hardware cleanup...")
-    
+
+    # Stop the roommap daemon BEFORE the hardware close (mirrors voice stop ordering).
+    try:
+        import pidog_roommap as roommap
+        roommap.stop_roommap()
+    except Exception as e:
+        print(f"⚠️ roommap stop failed (non-fatal): {e}", file=sys.stderr)
+
     # cleanup_hardware() ends with os._exit() and never returns
     try:
         # This call terminates the whole process via os._exit()
@@ -294,10 +332,16 @@ Examples:
         # Perform startup movements before voice module loads
         perform_startup_movements()
 
+        # Start the roommap daemon (local module; dedicated locked XML-RPC proxy)
+        # before the voice profile so the watchdog can supervise both.
+        import pidog_roommap as roommap
+        state.roommap_thread = roommap.start_roommap(_roommap_rpc)
+        print(f"  [ROOMMAP] roommap daemon started (thread: {state.roommap_thread.name})", file=sys.stderr)
+
         # CRITICAL FIX: Launch voice profile IMMEDIATELY after port verification
         print("\n🎤 Launching Voice Profile Module immediately...", file=sys.stderr)
 
-        success = run_voice_profile()
+        success = run_voice_profile(state.roommap_thread, roommap)
 
         if success:
             print("\n✅ PIDOG Core Pipeline initialization complete")

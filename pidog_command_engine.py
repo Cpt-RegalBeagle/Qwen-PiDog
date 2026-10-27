@@ -1,5 +1,6 @@
 """Background thread scanning the USER's STT transcription for direct action commands; fires matching RPC actions in fire-and-forget daemon threads. Shares pidog_personality_engine's _last_fire cooldown dict."""
 
+import os
 import queue
 import re
 import threading
@@ -17,6 +18,9 @@ from config import (
     MAX_ACTIONS_PER_MESSAGE,
     ENABLED,
     RETURN_TO_SIT_AFTER_ACTION,
+    ROOMMAP_DIR,
+    ROOMMAP_FOCUS_FILE,
+    ROOMMAP_TRIGGER_FILE,
 )
 
 from pidog_voice_rpc import _rpc_call_with_timeout
@@ -64,6 +68,17 @@ def _check_cooldown(method_name):
     return True
 
 
+def _fire_scan_room():
+    """LOCAL 'scan room' action: write the roommap trigger file (no RPC, no return-to-sit)."""
+    try:
+        os.makedirs(ROOMMAP_DIR, exist_ok=True)
+        with open(ROOMMAP_TRIGGER_FILE, 'w') as f:
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S'))
+        print("  [COMMAND] Roommap scan triggered (trigger file written)", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"  [COMMAND] Roommap trigger write failed: {e}", file=sys.stderr, flush=True)
+
+
 def _scan_text(text, rpc_client):
     """Scan the USER's transcription for triggers (word-boundary regex); matches all actions: PERSONALITY_ACTIONS plus MOVEMENT_ACTIONS."""
     if not ENABLED:
@@ -82,6 +97,17 @@ def _scan_text(text, rpc_client):
         pattern = r'\b' + re.escape(phrase.lower()) + r'\b'
         if not re.search(pattern, lowered):
             continue
+        if method_name == "local_scan_room":
+            # LOCAL action: 60 s cooldown via the shared _last_fire; no RPC, no return-to-sit.
+            now = time.monotonic()
+            last = _last_fire.get(method_name)
+            if last is not None and (now - last) < 60.0:
+                continue
+            _last_fire[method_name] = now
+            _fire_scan_room()
+            fired += 1
+            print(f"  [COMMAND] Fired '{method_name}' (trigger: '{phrase}')", file=sys.stderr, flush=True)
+            continue
         if not _check_cooldown(method_name):
             continue
         _last_fire[method_name] = time.monotonic()
@@ -97,6 +123,10 @@ def _engine_loop(rpc_client):
         try:
             text = command_queue.get(timeout=1.0)
         except queue.Empty:
+            continue
+        if os.path.exists(ROOMMAP_FOCUS_FILE):
+            # Voice must be fully quiet during roommap scans - drop, never fire.
+            print("  [COMMAND] Focus file present - dropping message (roommap scan active)", file=sys.stderr, flush=True)
             continue
         try:
             _scan_text(text, rpc_client)

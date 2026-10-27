@@ -42,3 +42,9 @@ Sunfounder SDK/
 *.appimage
 pidog/
 robot-hat/
+# Personal working config (setup.sh recreates from *.example)
+config.py
+ai-stack.sh
+ai-stack.local.sh
+.deploy-pipeline.sh
+launch_pidog_dashboard.sh

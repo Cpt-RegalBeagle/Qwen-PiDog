@@ -1,5 +1,6 @@
 """Scan AI response text for personality triggers and fire matching RPC actions."""
 
+import os
 import queue
 import re
 import threading
@@ -15,6 +16,7 @@ from config import (
     MAX_ACTIONS_PER_MESSAGE,
     ENABLED,
     RETURN_TO_SIT_AFTER_ACTION,
+    ROOMMAP_FOCUS_FILE,
 )
 
 from pidog_voice_rpc import _rpc_call_with_timeout
@@ -93,6 +95,10 @@ def _engine_loop(rpc_client):
         try:
             text = personality_queue.get(timeout=1.0)
         except queue.Empty:
+            continue
+        if os.path.exists(ROOMMAP_FOCUS_FILE):
+            # Voice must be fully quiet during roommap scans - drop, never fire.
+            print("  [PERSONALITY] Focus file present - dropping message (roommap scan active)", file=sys.stderr, flush=True)
             continue
         try:
             _scan_text(text, rpc_client)

@@ -16,6 +16,7 @@ def log_config_error(message: str, level: str = "WARNING"):
 # ==================== NETWORK SETTINGS ====================
 # Override via SERVER_IP env var
 SERVER_IP: str = os.getenv("SERVER_IP", "192.168.0.163")
+TUNNEL_IP: str = os.getenv("TUNNEL_IP", "http://ai.meigs.co.uk")
 
 # ==================== PORT SETTINGS ====================
 PORT_LLAMA: int = 11434
@@ -124,4 +125,16 @@ COOLDOWN_SECONDS: float = 2.0            # min gap between same-action firings
 MAX_ACTIONS_PER_MESSAGE: int = 1         # only fire the first match per text blob
 ENABLED: bool = True                     # master on/off switch
 RETURN_TO_SIT_AFTER_ACTION: bool = True  # engine fires action('sit') after each personality action
+
+# ==================== ROOMMAP SETTINGS ====================
+ROOMMAP_DIR: str = os.path.expanduser("~/roommap_data")
+ROOMMAP_TRIGGER_FILE: str = os.path.join(ROOMMAP_DIR, "roommap.trigger")
+ROOMMAP_FOCUS_FILE: str = os.path.join(ROOMMAP_DIR, "roommap.focus")
+ROOMMAP_LATEST_FILE: str = os.path.join(ROOMMAP_DIR, "roommap_latest.json")
+ROOMMAP_YAW_STEP_DEG: int = 10
+ROOMMAP_MIN_CLEAR_CM: int = 30
+ROOMMAP_MAX_RANGE_CM: int = 150
+ROOMMAP_STEP_CM: int = 30
+ROOMMAP_MAX_CLUSTERS: int = 6
+ROOMMAP_MAX_DURATION_S: int = 300
 

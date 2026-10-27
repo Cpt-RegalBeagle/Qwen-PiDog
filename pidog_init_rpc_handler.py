@@ -25,6 +25,26 @@ class PidogRPCHandler(PidogActionMethods):
 
         # dog.ears is pre-initialized in pidog_init.py - do NOT re-create it.
 
+    def read_distance(self):
+        """Read ultrasonic distance in cm (-1.0 on no echo)"""
+        return round(float(self.dog.read_distance()), 2)
+
+    def touch_read(self):
+        """Read dual touch state ('N'|'L'|'R'|'LS'|'RS')"""
+        return self.dog.dual_touch.read()
+
+    def head_move(self, yaw=0, roll=0, pitch=0, speed=50):
+        """Move head to yaw/roll/pitch degrees relative to neutral"""
+        self.dog.head_move([[yaw, roll, pitch]], immediately=True, speed=speed)
+        return True
+
+    def wait_head_done(self, timeout=30.0):
+        """Wait up to timeout seconds for head motion to complete"""
+        t0 = time.monotonic()
+        while not self.dog.is_head_done() and time.monotonic() - t0 < timeout:
+            time.sleep(0.02)
+        return bool(self.dog.is_head_done())
+
     def action(self, name):
         """Smart catch-all router that enforces our safe, non-blocking custom methods over legacy SDK strings."""
 

@@ -100,6 +100,10 @@ def _start_audio_worker():
                 if is_speaking and time.monotonic() < is_speaking_deadline:
                     time.sleep(0.5); continue
 
+                # Roommap scan active: stay fully quiet until the focus file clears.
+                if os.path.exists(config.ROOMMAP_FOCUS_FILE):
+                    time.sleep(0.5); continue
+
                 # Phase 1: VAD - record 1s snippet from the recording mic (sound card)
                 result = _rpc_call_with_timeout('audio_record', 1, audio_file)
                 if not result or result.get('status') != 'success':

@@ -130,4 +130,6 @@ MOVEMENT_ACTIONS = {
     "move":               ("trot", []),
     "come here":          ("recall", []),
     "come":               ("recall", []),
+    # --- LOCAL actions (no RPC; dispatched specially by pidog_command_engine) ---
+    "scan room":          ("local_scan_room", []),
 }
